@@ -7,6 +7,16 @@
 #include <cstdlib>
 #include <iostream>
 
+// setenv is POSIX only; MSVC has _putenv_s
+static void setEnvVar(const char* name, const char* value)
+{
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 static int passed = 0, failed = 0;
 #define CHECK(cond, msg)                                                              \
     do {                                                                              \
@@ -446,7 +456,7 @@ int main()
     auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("PastelSamplerHarness");
     tmp.deleteRecursively();
     tmp.createDirectory();
-    setenv("PASTEL_SETTINGS_FOLDER", tmp.getChildFile("settings").getFullPathName().toRawUTF8(), 1);
+    setEnvVar("PASTEL_SETTINGS_FOLDER", tmp.getChildFile("settings").getFullPathName().toRawUTF8());
     const double sr = 48000.0;
 
     std::cout << "== pitch detection on synthetic tones\n";
