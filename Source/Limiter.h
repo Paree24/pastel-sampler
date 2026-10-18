@@ -6,6 +6,8 @@
 // Master brick-wall peak limiter: 1.5 ms lookahead, stereo-linked, sliding-minimum gain
 // computer (the gain is already down when a peak reaches the output), smooth release.
 // Peaks are turned down instead of clipped; a final clamp only catches rounding.
+// Shared module (also in the Drum Sampler / SFZ Player): prepare() allocates,
+// process() never does. Report latency() to the host (it holds while bypassed too).
 class PeakLimiter
 {
 public:
@@ -36,7 +38,7 @@ public:
         lastReduction = 0.0f;
     }
 
-    int latency() const { return la; }
+    int latency() const { return size; } // the real delay: a sample written now is read back size samples later
     float reductionDb() const { return lastReduction; }
 
     // enabled = false keeps the same latency (delay only) so toggling never shifts timing

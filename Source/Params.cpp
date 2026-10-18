@@ -56,7 +56,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     add(new APC({ S_INTERP, 1 }, "Interpolation", interpChoices, 2));
     add(new APB({ LOOP_ON, 1 }, "Loop", false));
     add(new APC({ LOOP_TYPE, 1 }, "Loop Type", loopTypeChoices, 0));
-    add(new APF({ S_START, 1 }, "Start", NR(0.0f, 1.0f), 0.0f, unit("%", 2)));
+    add(new APF({ S_START, 1 }, "Start", NR(0.0f, 1.0f), 0.0f,
+                juce::AudioParameterFloatAttributes().withLabel("%").withStringFromValueFunction([](float v, int)
+                { return juce::String(v * 100.0f, 1) + " %"; })));
     add(new APF({ S_XFADE, 1 }, "Loop Xfade", skewed(0.0f, 500.0f, 60.0f), 60.0f, unit("ms", 0)));
     add(new APF({ S_TUNE, 1 }, "Sampler Tune", NR(-100.0f, 100.0f, 0.1f), 0.0f, unit("ct")));
     add(new APF({ S_LEVEL, 1 }, "Sampler Level", NR(-48.0f, 6.0f, 0.1f), 0.0f, unit("dB")));
@@ -111,6 +113,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     add(new APB({ V_RR, 1 }, "Round Robin", false));
     add(new APB({ V_MONO, 1 }, "Mono Out", false));
     add(new APC({ V_TUNING, 1 }, "Tuning", tuningChoices, 0));
+    add(new APC({ V_TONIC, 1 }, "Tuning Tonic", tonicChoices, 0)); // C = the old fixed tonic
     add(new APC({ V_A4, 1 }, "A4", a4Choices, 5));
     add(new API({ V_LOKEY, 1 }, "Low Key", 0, 127, 21, noteAttr));
     add(new API({ V_HIKEY, 1 }, "High Key", 0, 127, 108, noteAttr));
@@ -152,6 +155,31 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     add(new APB({ DLSYNC, 1 }, "Delay Sync", false));
     add(new APC({ DLDIV, 1 }, "Delay Division", delayDivs, 1));
     add(new APB({ LIMIT, 1 }, "Limiter", true));
+
+    add(new APB({ ARP_ON, 1 }, "Arp On", false));
+    add(new APC({ ARP_MODE, 1 }, "Arp Mode", arpModes, 0));
+    add(new APC({ ARP_DIV, 1 }, "Arp Division", arpDivs, 6));
+    add(new API({ ARP_OCT, 1 }, "Arp Octaves", 1, 4, 1));
+    add(new APF({ ARP_GATE, 1 }, "Arp Gate", NR(0.1f, 1.0f), 0.8f, unit("", 2)));
+    add(new APF({ ARP_SWING, 1 }, "Arp Swing", NR(0.0f, 1.0f), 0.0f, unit("", 2)));
+    add(new APB({ ARP_LATCH, 1 }, "Arp Latch", false));
+    add(new APB({ ARP_VEL, 1 }, "Arp Played Velocity", true));
+
+    for (int k = 0; k < 2; ++k)
+    {
+        const juce::String n = "LFO " + juce::String(k + 1);
+        add(new APF({ L_RATE[k], 1 }, n + " Rate", skewed(0.02f, 20.0f, 2.0f), k == 0 ? 2.0f : 0.5f, unit("Hz", 2)));
+        add(new APC({ L_WAVE[k], 1 }, n + " Wave", lfoWaves, 0));
+        add(new APB({ L_SYNC[k], 1 }, n + " Sync", false));
+        add(new APC({ L_DIV[k], 1 }, n + " Division", lfoDivs, 4));
+    }
+    for (int k = 0; k < kModSlots; ++k)
+    {
+        const juce::String n = "Mod " + juce::String(k + 1);
+        add(new APC({ modSrcId(k), 1 }, n + " Source", modSources, 0));
+        add(new APF({ modAmtId(k), 1 }, n + " Amount", NR(-1.0f, 1.0f), 0.0f, unit("", 2)));
+        add(new APC({ modDstId(k), 1 }, n + " Destination", modDests, 0));
+    }
     return l;
 }
 }

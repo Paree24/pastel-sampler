@@ -1,5 +1,6 @@
 // Headless checks for Pastel Sampler: detection accuracy, per-engine output pitch,
 // key blend, loop / keep-length behaviour, state round trip and CPU cost.
+#include "../Source/FactoryPresets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "PluginProcessor.h"
@@ -101,6 +102,23 @@ static juce::AudioBuffer<float> playNote(PastelProcessor& p, int note, double sr
             midi.addEvent(juce::MidiMessage::noteOff(1, note), offAt - pos);
             for (int e : extra) midi.addEvent(juce::MidiMessage::noteOff(1, e), offAt - pos);
         }
+        p.renderOffline(buf, midi);
+        for (int c = 0; c < 2; ++c) out.copyFrom(c, pos, buf, c, 0, n);
+    }
+    return out;
+}
+
+// render `secs` of audio in 256-sample blocks; `first` is sent with the first block
+static juce::AudioBuffer<float> renderFor(PastelProcessor& p, double sr, double secs, const juce::MidiBuffer& first = {})
+{
+    const int block = 256, total = (int) (secs * sr);
+    juce::AudioBuffer<float> out(2, total), buf(2, block);
+    for (int pos = 0; pos < total; pos += block)
+    {
+        const int n = juce::jmin(block, total - pos);
+        buf.setSize(2, n, false, false, true);
+        juce::MidiBuffer midi;
+        if (pos == 0) midi = first;
         p.renderOffline(buf, midi);
         for (int c = 0; c < 2; ++c) out.copyFrom(c, pos, buf, c, 0, n);
     }
@@ -945,6 +963,234 @@ int main()
         playNote(proc, 60, sr, 0.02, 0.0);
     }
 
+    std::cout << "== tuning tonic\n";
+    {
+        EngineParams ep;
+        ep.tuning = 1; // just
+        ep.tonic = 0;
+        const float eC = Blend::noteHz(ep, 64); // E over C: pure major third (-13.69 ct)
+        ep.tonic = 4;
+        const float eE = Blend::noteHz(ep, 64); // E is the tonic now: equal-tempered
+        ep.tonic = 2;
+        const float fsD = Blend::noteHz(ep, 66); // F# over D: pure major third
+        CHECK(std::abs(centsBetween(eC, 329.628f) + 13.69f) < 0.05f && std::abs(centsBetween(eE, 329.628f)) < 0.05f
+              && std::abs(centsBetween(fsD, 369.994f) + 13.69f) < 0.05f,
+              "Just tonic moves the scale (E over C " << juce::String(centsBetween(eC, 329.628f), 2) << " ct, F# over D "
+              << juce::String(centsBetween(fsD, 369.994f), 2) << " ct)");
+    }
+
+    std::cout << "== rebuilds keep sounding notes\n";
+    {
+        proc.loadSampleSync(susF.getFullPathName());
+        onlyEngine(proc, 0);
+        setLoop(proc, 1);
+        proc.rebuildSync(false);
+        proc.panic();
+        renderFor(proc, sr, 0.05);
+        juce::MidiBuffer on;
+        on.addEvent(juce::MidiMessage::noteOn(1, 57, 1.0f), 0);
+        auto a = renderFor(proc, sr, 0.4, on);
+        const float before = rms(a, sr, 0.2, 0.4);
+        bool allKept = true;
+        for (auto edit : { 0, 1, 2, 3 })
+        {
+            if (edit == 0) setParam(proc, PP::S_XFADE, 120.0f);
+            if (edit == 1) setParam(proc, PP::LOOP_TYPE, 1.0f);
+            if (edit == 2) setParam(proc, PP::QUALITY, 0.0f);
+            if (edit == 3) setParam(proc, PP::ALGO, 0.0f);
+            proc.rebuildSync(edit == 3);
+            auto b = renderFor(proc, sr, 0.2);
+            const float after = rms(b, sr, 0.0, 0.2);
+            allKept = allKept && after > before * 0.5f;
+            if (after <= before * 0.5f) std::cout << "       edit " << edit << " dropped the note (" << after << " vs " << before << ")\n";
+        }
+        CHECK(allKept && proc.getActiveNotes().size() == 1, "loop / xfade / quality / algorithm edits leave the held note sounding");
+        proc.panic();
+        renderFor(proc, sr, 0.05);
+        setParam(proc, PP::S_XFADE, 60.0f); setParam(proc, PP::LOOP_TYPE, 0.0f);
+        setParam(proc, PP::QUALITY, 1.0f); setParam(proc, PP::ALGO, 2.0f);
+        setLoop(proc, 0);
+        proc.loadSampleSync(wavF.getFullPathName());
+    }
+
+    std::cout << "== undo / redo\n";
+    {
+        auto vol = [&] { return proc.apvts.getRawParameterValue(PP::VOLUME)->load(); };
+        setParam(proc, PP::VOLUME, -6.0f);
+        proc.pushUndo(); // what a knob gesture does
+        setParam(proc, PP::VOLUME, -20.0f);
+        proc.undo();
+        const float undone = vol();
+        proc.redo();
+        CHECK(std::abs(undone + 6.0f) < 0.05f && std::abs(vol() + 20.0f) < 0.05f, "undo / redo a parameter ("
+              << undone << " -> " << vol() << " dB)");
+        proc.undo();
+        const auto inst0 = proc.getInstrument();
+        proc.toggleNormalize(); // pushes its own step
+        const bool normOn = proc.getEdits().normalize;
+        proc.undo();
+        CHECK(normOn && !proc.getEdits().normalize && proc.getInstrument() != nullptr
+              && proc.getInstrument()->path == inst0->path, "undo a sample edit (same file, no reload)");
+        proc.loadSampleSync(susF.getFullPathName());
+        proc.undo();
+        CHECK(proc.getInstrument()->path == inst0->path, "undo a sample load brings the previous file back");
+        proc.redo();
+        CHECK(proc.getInstrument()->path == juce::File(susF).getFullPathName(), "redo the load");
+        proc.loadSampleSync(wavF.getFullPathName());
+    }
+
+    std::cout << "== modulation: LFOs + matrix\n";
+    {
+        PastelProcessor mp;
+        mp.setAsyncLoads(false);
+        mp.prepareToPlay(sr, 256);
+        mp.loadSampleSync(susF.getFullPathName());
+        setLoop(mp, 1);
+        // LFO 1 (square, 0.5 Hz) -> pitch, 1 semitone: the note swings +-100 ct
+        setParam(mp, PP::L_WAVE[0], 3); setParam(mp, PP::L_RATE[0], 0.5f);
+        setParam(mp, PP::modSrcId(0), MS_LFO1); setParam(mp, PP::modDstId(0), MD_PITCH); setParam(mp, PP::modAmtId(0), 1.0f / 12.0f);
+        auto b = playNote(mp, 57, sr, 2.2, 0.1);
+        float lo = 1e9f, hi = 0;
+        for (double t = 0.1; t < 2.1; t += 0.1)
+        {
+            const float f = measurePitch(b, sr, t, t + 0.08);
+            if (f > 0) { lo = juce::jmin(lo, f); hi = juce::jmax(hi, f); }
+        }
+        CHECK(std::abs(centsBetween(hi, lo) - 200.0f) < 15.0f, "LFO 1 -> pitch swings the note (" << juce::String(centsBetween(hi, lo), 1) << " ct p-p)");
+        setParam(mp, PP::modSrcId(0), MS_NONE);
+
+        // mod wheel -> cutoff opens a closed filter
+        setParam(mp, PP::F_ON, 1); setParam(mp, PP::F_CUT, 300); setParam(mp, PP::F_RES, 0.0f);
+        setParam(mp, PP::modSrcId(1), MS_WHEEL); setParam(mp, PP::modDstId(1), MD_CUTOFF); setParam(mp, PP::modAmtId(1), 1.0f);
+        auto level = [&](int wheel)
+        {
+            juce::MidiBuffer m;
+            m.addEvent(juce::MidiMessage::controllerEvent(1, 1, wheel), 0);
+            m.addEvent(juce::MidiMessage::noteOn(1, 69, 1.0f), 0);
+            auto out = renderFor(mp, sr, 0.5, m);
+            juce::MidiBuffer off; off.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+            renderFor(mp, sr, 0.3, off);
+            return rms(out, sr, 0.2, 0.45);
+        };
+        const float closed = level(0), open = level(127);
+        CHECK(open > 1.5f * closed, "mod wheel -> cutoff opens the filter (" << juce::String(closed, 3) << " -> " << juce::String(open, 3) << ")");
+        setParam(mp, PP::F_ON, 0); setParam(mp, PP::modSrcId(1), MS_NONE);
+
+        // velocity -> level (negative): a hard hit is quieter than a soft one
+        setParam(mp, PP::modSrcId(2), MS_VEL); setParam(mp, PP::modDstId(2), MD_LEVEL); setParam(mp, PP::modAmtId(2), -1.0f);
+        const float hard = rms(playNote(mp, 57, sr, 0.4, 0.2, 1.0f), sr, 0.1, 0.35);
+        CHECK(hard < 0.02f, "velocity -> level routes per voice (" << juce::String(hard, 4) << ")");
+        setParam(mp, PP::modSrcId(2), MS_NONE);
+
+        // granular position: LFO -> grain pos keeps the output finite
+        setParam(mp, PP::ENGINE, (float) PP::kGranular);
+        setParam(mp, PP::modSrcId(3), MS_LFO2); setParam(mp, PP::modDstId(3), MD_GPOS); setParam(mp, PP::modAmtId(3), 1.0f);
+        setParam(mp, PP::modSrcId(4), MS_RAND); setParam(mp, PP::modDstId(4), MD_GSIZE); setParam(mp, PP::modAmtId(4), 1.0f);
+        auto g = playNote(mp, 57, sr, 1.0, 0.2);
+        CHECK(finite(g) && rms(g, sr, 0.2, 0.9) > 0.01f, "LFO -> grain position + random -> size play cleanly");
+    }
+
+    std::cout << "== arpeggiator (host grid, swing, latch)\n";
+    {
+        struct TestHead : juce::AudioPlayHead
+        {
+            double ppq = 0.0;
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                PositionInfo p; p.setBpm(120.0); p.setIsPlaying(true); p.setPpqPosition(ppq); return p;
+            }
+        } head;
+        PastelProcessor ap;
+        ap.setAsyncLoads(false);
+        ap.setPlayHead(&head);
+        ap.prepareToPlay(sr, 256);
+        ap.loadSampleSync(susF.getFullPathName());
+        setLoop(ap, 1);
+        setParam(ap, PP::ARP_ON, 1); setParam(ap, PP::ARP_DIV, 6); setParam(ap, PP::ARP_GATE, 0.5f);
+        const double beat = 0.5 * sr;
+        auto firstOn = [&](int note, juce::MidiBuffer start, int maxSamples)
+        {
+            for (int pos = 0; pos < maxSamples; pos += 32)
+            {
+                head.ppq = pos / beat;
+                juce::AudioBuffer<float> b(2, 32); b.clear();
+                juce::MidiBuffer m = pos == 0 ? start : juce::MidiBuffer();
+                ap.renderOffline(b, m);
+                for (int n : ap.getActiveNotes()) if (n == note) return pos;
+            }
+            return -1;
+        };
+        juce::MidiBuffer chord;
+        chord.addEvent(juce::MidiMessage::noteOn(1, 57, 0.9f), 0);
+        chord.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        const int straight = firstOn(60, chord, (int) sr);
+        ap.panic(); renderFor(ap, sr, 0.05);
+        setParam(ap, PP::ARP_SWING, 1.0f);
+        const int swung = firstOn(60, chord, (int) sr);
+        const double step = 0.25 * beat;
+        CHECK(std::abs(straight - step) <= 33 && std::abs(swung - 1.5 * step) <= 33,
+              "arp step 2 on the host grid (" << straight << "), swung half a step late (" << swung << ")");
+        setParam(ap, PP::ARP_SWING, 0.0f);
+        // latch: release the keys, the pattern keeps running
+        setParam(ap, PP::ARP_LATCH, 1);
+        juce::MidiBuffer up;
+        up.addEvent(juce::MidiMessage::noteOff(1, 57), 0);
+        up.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+        CHECK(firstOn(57, up, (int) sr) >= 0, "arp latch keeps the pattern after the keys go up");
+        setParam(ap, PP::ARP_ON, 0);
+        renderFor(ap, sr, 0.3);
+        CHECK(ap.getActiveNotes().empty(), "arp off releases its notes");
+        ap.setPlayHead(nullptr);
+    }
+
+    std::cout << "== factory presets + randomize with locks\n";
+    {
+        PastelProcessor rp;
+        rp.setAsyncLoads(false);
+        rp.prepareToPlay(sr, 256);
+        rp.loadSampleSync(wavF.getFullPathName());
+        auto val = [&](const juce::String& id) { return rp.apvts.getRawParameterValue(id)->load(); };
+        setParam(rp, PP::ROOTOVR, 1); setParam(rp, PP::ROOTNOTE, 62);
+        const auto& recipes = FactoryPresets::all();
+        int cloud = -1;
+        for (size_t k = 0; k < recipes.size(); ++k) if (recipes[k].name == "Grain Cloud") cloud = (int) k;
+        rp.applyFactoryPreset(cloud);
+        CHECK(std::lround(val(PP::ENGINE)) == PP::kGranular && std::lround(val(PP::ROOTNOTE)) == 62
+              && rp.getPresetName() == "Grain Cloud", "factory preset plays on the loaded sample, root kept");
+        bool allFinite = true;
+        for (size_t k = 0; k < recipes.size(); ++k)
+        {
+            rp.applyFactoryPreset((int) k);
+            allFinite = allFinite && finite(playNote(rp, 62, sr, 0.3, 0.1));
+        }
+        CHECK(allFinite, "every factory preset renders cleanly (" << (int) recipes.size() << ")");
+
+        CHECK(rp.isGroupLocked(PastelProcessor::RG_SAMPLE) && rp.isGroupLocked(PastelProcessor::RG_ROOT)
+              && !rp.isGroupLocked(PastelProcessor::RG_ENGINE), "sample + root locked by default");
+        rp.setGroupLocked(PastelProcessor::RG_FX, true);
+        setParam(rp, PP::RVMIX, 0.123f);
+        const float vol0 = val(PP::VOLUME);
+        const auto path0 = rp.getInstrument()->path;
+        bool kept = true, changed = false;
+        for (int k = 0; k < 6; ++k)
+        {
+            const float eng0 = val(PP::E_A);
+            rp.randomize();
+            kept = kept && std::abs(val(PP::RVMIX) - 0.123f) < 1e-3f && std::lround(val(PP::ROOTNOTE)) == 62
+                   && val(PP::VOLUME) == vol0 && rp.getInstrument()->path == path0;
+            changed = changed || val(PP::E_A) != eng0;
+        }
+        CHECK(kept && changed, "randomize changes unlocked groups, never locked ones / root / sample / volume");
+        const float a0 = val(PP::E_A);
+        rp.undo();
+        CHECK(val(PP::E_A) != a0, "randomize is one undo step");
+        rp.setGroupLocked(PastelProcessor::RG_ENV, true);
+        const float d0 = val(PP::E_D), cut0 = val(PP::F_CUT);
+        rp.mutate(0.2f);
+        CHECK(val(PP::E_D) == d0 && val(PP::F_CUT) != cut0, "mutate nudges unlocked values only");
+        CHECK(finite(playNote(rp, 62, sr, 0.3, 0.1)), "randomized patch renders cleanly");
+    }
+
     std::cout << "== state round trip\n";
     {
         setParam(proc, PP::ROOTOVR, 1);
@@ -1018,6 +1264,8 @@ int main()
         for (auto name : { "SAMPLER", "ADDITIVE", "SPECTRAL", "GRANULAR" })
             if (auto* tb = findT(ed.get(), name)) { tb->onClick(); save(juce::String("tab_") + name + ".png"); }
         if (auto* fxBtn = find(ed.get())) { fxBtn->onClick(); save("page_effects.png"); }
+        if (auto* modBtn = findT(ed.get(), "MOD")) { modBtn->onClick(); save("page_mod.png"); }
+        if (auto* pb = findT(ed.get(), proc.getPresetName())) { pb->onClick(); save("preset_browser.png"); }
         ed.reset();
     }
 

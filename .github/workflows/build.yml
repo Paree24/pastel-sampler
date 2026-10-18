@@ -73,6 +73,12 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a ${{ matrix.harness }}
 
+      - name: Host check (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build --config Release --target PastelSamplerHostCheck
+          xvfb-run -a ./build/PastelSamplerHostCheck "build/PastelSampler_artefacts/Release/VST3/Pastel Sampler.vst3"
+
       - name: Self-test (macOS)
         if: runner.os == 'macOS'
         run: ${{ matrix.harness }}

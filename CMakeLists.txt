@@ -40,6 +40,7 @@ set(PASTEL_SOURCES
   Source/PluginEditor.cpp
   Source/PastelLookAndFeel.cpp
   Source/Widgets.cpp
+  Source/PresetBrowser.cpp
   Source/PianoStrip.cpp
 )
 
@@ -87,3 +88,15 @@ target_link_libraries(PastelSamplerHarness PRIVATE
   juce::juce_dsp
   PastelSamplerAssets
 )
+
+# Host-load check: loads the built .vst3 through JUCE's VST3 hosting (dev only)
+#   build/PastelSamplerHostCheck "build/PastelSampler_artefacts/Release/VST3/Pastel Sampler.vst3"
+add_executable(PastelSamplerHostCheck Test/HostCheck.cpp)
+target_link_libraries(PastelSamplerHostCheck PRIVATE
+  juce::juce_audio_utils
+  juce::juce_audio_processors
+  juce::juce_recommended_config_flags
+)
+target_compile_definitions(PastelSamplerHostCheck PRIVATE
+  JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+add_dependencies(PastelSamplerHostCheck PastelSampler_VST3)

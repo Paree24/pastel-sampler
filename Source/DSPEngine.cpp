@@ -488,8 +488,9 @@ void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
         reverb.process(L, R, N, p.rvSize, p.rvDamp, p.rvMix);
 
     // ---------- mono sum + master + limiter + meters ----------
-    // Limiter is transparent below -0.9 dBFS and only rounds overs above it
-    // (asymptotic to 1.0): normal levels pass bit-dry, hot stacks can't clip.
+    // Optional soft limiter: transparent below -0.9 dBFS, only rounds overs above it
+    // (asymptotic to 1.0). Off = no clamp here: the processor's lookahead PeakLimiter
+    // (or the host) owns the ceiling.
     float peakL = 0.0f, peakR = 0.0f;
     for (int i = 0; i < N; ++i)
     {
@@ -497,7 +498,6 @@ void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
         if (p.mono) { float mid = 0.5f * (xL + xR); xL = mid; xR = mid; }
         xL *= p.volume; xR *= p.volume;
         if (p.limiter) { xL = softLimit(xL); xR = softLimit(xR); }
-        else { xL = juce::jlimit(-1.2f, 1.2f, xL); xR = juce::jlimit(-1.2f, 1.2f, xR); }
         L[i] = xL; R[i] = xR;
         peakL = juce::jmax(peakL, std::abs(xL));
         peakR = juce::jmax(peakR, std::abs(xR));

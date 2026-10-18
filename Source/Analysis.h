@@ -20,13 +20,6 @@ struct PitchResult
     bool pitched() const { return f0 > 0.0f && confidence >= 0.25f; }
 };
 
-struct PitchTrack
-{
-    std::vector<float> hz;    // per frame, 0 = unvoiced
-    int hop = 0;              // in source samples
-    int firstSample = 0;      // sample index of frame 0 centre
-};
-
 // Time-varying harmonic amplitudes for the additive engine.
 struct AdditiveData
 {
@@ -84,7 +77,6 @@ struct Instrument
     bool loopBaked = false;
     double anaStart = 0, anaEnd = 0;
     PitchResult pitch;
-    PitchTrack track;
     std::shared_ptr<const AdditiveData> additive;
     std::shared_ptr<const SpectralData> spectral;  // left (or mono)
     std::shared_ptr<const SpectralData> spectralR; // right; same object as `spectral` for mono files
@@ -99,15 +91,12 @@ namespace Analysis
     std::vector<float> mixToMono(const juce::AudioBuffer<float>& b, int start, int end);
 
     PitchResult detectPitch(const float* mono, int n, double sr, Algo algo);
-    PitchTrack trackPitch(const float* mono, int n, double sr, int maxFrames = 300);
 
     std::shared_ptr<AdditiveData> analyseAdditive(const float* mono, int n, double sr, float f0, int maxPartials = 128);
     std::shared_ptr<SpectralData> analyseSpectral(const float* mono, int n, double sr, int fftSize, float f0);
 
     // default analysis window: skip the attack, take the steady part
     void defaultAnalysisWindow(const float* mono, int n, double sr, double& a0, double& a1);
-    // trim to the audible region
-    void findTrim(const float* mono, int n, int& start, int& end);
     // automatic loop points (zero-crossing snapped, correlation matched)
     bool findLoop(const float* mono, int n, double sr, float f0, int start, int end, int& ls, int& le);
 

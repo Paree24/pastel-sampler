@@ -60,9 +60,25 @@ inside the selection. Root detection follows the selection. The **EFFECTS**
 page has the Pastel player's chain: chorus, phaser, flanger, distortion,
 saturation, reverb, delay (tempo sync) and master volume / limiter / mono.
 
+**MOD page:** two LFOs (sine, triangle, saw, square, S&H; free Hz or synced to
+the host tempo) and an 8-slot mod matrix. Sources: LFO 1/2, mod wheel,
+aftertouch, velocity, key and a per-note random value. Destinations: pitch,
+cutoff, resonance, level, pan, grain position / size / density / spray, formant
+shift, smear, freeze and additive tilt, applied per voice every 32 samples.
+The **arpeggiator** (up, down, up-down, random; 1/4 to 1/32 with dotted and
+triplet steps, 1-4 octaves, gate, swing, latch, played velocity) locks to the
+host grid while the transport runs. **RANDOMIZE** / **MUTATE** change only the
+unlocked groups (Sample and Root are locked by default); each is one undo step.
+
+**Presets:** the PRESETS browser lists factory sounds, which play on the loaded
+sample and keep its root, plus your own presets (sample + all settings) in
+Documents/Pastel Sampler/Presets. **UNDO** / **REDO** (Ctrl+Z / Ctrl+Shift+Z)
+cover knob moves, sample edits and loads, presets and randomize.
+
 **Root detection:** YIN, HPS, or both combined, then refined on the harmonic
-peaks of a long FFT. It runs on a draggable analysis window and shows a
-confidence value. You can override the root note and fine tune, set it with
+peaks of a long FFT. It runs on an automatic analysis window (the steady
+part after the attack, inside the S..E selection) and shows a confidence
+value. The window is not draggable: moving the S / E flags re-places it. You can override the root note and fine tune, set it with
 MIDI learn, or run the detection again. The browser detects the root of every
 file in the current folder in the background.
 
@@ -183,6 +199,8 @@ read up to 120 s.
 `PASTEL_EVAL_FILES="a.wav;b.wav" PASTEL_EVAL_OUT=dir` makes the harness render
 real files through the Sampler and Spectral engines (unity, +7, +12 and −12 st)
 and report unity SNR. `PASTEL_SNAPSHOT_DIR=dir` renders the editor pages to PNG.
+`PastelSamplerHostCheck <Pastel Sampler.vst3>` loads the built VST3 like a DAW
+(buses, latency, a sample load and note, state, editor).
 
 **Dev hook:** `PASTEL_AUTOLOAD=/path/to/file.wav` preloads a sample at startup.
 `PASTEL_SETTINGS_FOLDER` switches to a separate settings folder.

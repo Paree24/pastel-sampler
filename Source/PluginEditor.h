@@ -5,6 +5,7 @@
 #include "PastelLookAndFeel.h"
 #include "PianoStrip.h"
 #include "Widgets.h"
+#include "PresetBrowser.h"
 
 // Browser list: folders first, then audio files with a format tag and detected root.
 class FileListModel : public juce::ListBoxModel
@@ -32,6 +33,7 @@ public:
     ~PastelEditor() override;
 
     void resized() override;
+    bool keyPressed(const juce::KeyPress&) override;
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int, int) override;
 
@@ -95,8 +97,10 @@ private:
 
     // header
     juce::TextButton loadBtn { "LOAD" }, prevBtn { "<" }, nextBtn { ">" }, panicBtn { "PANIC" };
-    juce::ComboBox presetBox;
-    juce::String presetName { "Init" };
+    juce::TextButton undoBtn { "UNDO" }, redoBtn { "REDO" };
+    void afterStateJump(); // after undo / redo / preset / randomize: refresh custom views
+    juce::TextButton presetBtn; // shows the current preset name, opens the browser
+    PresetBrowser presetBrowser;
 
     // browser
     juce::TextEditor searchBox;
@@ -123,6 +127,7 @@ private:
     juce::TextButton learnBtn { "MIDI LEARN" }, redetectBtn { "RE-DETECT" };
     Switch* overrideSwitch = nullptr;
     Choice* rootChoice = nullptr;
+    Choice* tonicChoice = nullptr;
     Knob* fineKnob = nullptr;
     juce::ComboBox voicesBox;
     std::array<juce::TextButton, 5> engineBtns;
@@ -140,8 +145,13 @@ private:
     void showTab(int tab);
     void updateVisibility();
     // pages: MAIN (sample / engines / root / env / filter) and EFFECTS
-    juce::TextButton mainTab { "MAIN" }, fxTab { "EFFECTS" };
-    juce::Component fxPage;
+    juce::TextButton mainTab { "MAIN" }, fxTab { "EFFECTS" }, modTab { "MOD" };
+    juce::Component fxPage, modPage;
+    // MOD page: LFOs, matrix, arp, randomize
+    juce::TextButton randomBtn { "RANDOMIZE" }, mutateBtn { "MUTATE" };
+    std::array<juce::TextButton, PastelProcessor::RG_COUNT> lockBtns;
+    std::array<View, 2> lfoMeters; // live LFO value per card
+    void buildModPage();
     std::vector<juce::Component*> mainComps;
     juce::Component* parent = &view; // where the build helpers add components
     void buildEffectsPage();
@@ -154,7 +164,7 @@ private:
 
     int lastScanVersion = -1, flash = 0;
     juce::String lastStatus, lastParamsKey;
-    juce::Rectangle<int> meterArea { 1258, 26, 122, 26 };
+    juce::Rectangle<int> meterArea { 1258, 26, 122, 38 }; // OUT bars + limiter GR readout
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PastelEditor)
 };

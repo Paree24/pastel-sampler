@@ -320,21 +320,6 @@ PitchResult detectPitch(const float* x, int n, double sr, Algo algo)
     return r;
 }
 
-PitchTrack trackPitch(const float* x, int n, double sr, int maxFrames)
-{
-    PitchTrack t;
-    Yin yin(sr);
-    if (n < yin.frameLen) return t;
-    t.hop = juce::jmax(yin.W / 2, (n - yin.frameLen) / juce::jmax(1, maxFrames));
-    t.firstSample = yin.frameLen / 2;
-    for (int s = 0; s + yin.frameLen <= n; s += t.hop)
-    {
-        auto f = yin.analyse(x + s);
-        t.hz.push_back(f.conf > 0.6f ? f.f0 : 0.0f);
-    }
-    return t;
-}
-
 std::shared_ptr<AdditiveData> analyseAdditive(const float* x, int n, double sr, float f0, int maxPartials)
 {
     auto d = std::make_shared<AdditiveData>();
@@ -564,20 +549,6 @@ void defaultAnalysisWindow(const float* x, int n, double sr, double& a0, double&
     }
     a0 = juce::jlimit(0.0, (double) n, s);
     a1 = juce::jlimit(a0, (double) n, e);
-}
-
-void findTrim(const float* x, int n, int& start, int& end)
-{
-    float peak = 0;
-    for (int i = 0; i < n; ++i) peak = juce::jmax(peak, std::abs(x[i]));
-    start = 0;
-    end = n;
-    if (peak <= 0) return;
-    for (int i = 0; i < n; ++i)
-        if (std::abs(x[i]) > peak * 0.003f) { start = juce::jmax(0, i - 64); break; }
-    for (int i = n - 1; i >= 0; --i)
-        if (std::abs(x[i]) > peak * 0.001f) { end = juce::jmin(n, i + 256); break; }
-    if (end <= start) { start = 0; end = n; }
 }
 
 bool findLoop(const float* x, int n, double sr, float f0, int start, int end, int& ls, int& le)

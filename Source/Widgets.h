@@ -2,7 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "PluginProcessor.h"
 
-// Waveform with draggable S / L / L / E markers, f0 overlay, analysis window and ruler.
+// Waveform with draggable S / L / L / E markers, live grains and ruler.
 class WaveformView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
@@ -41,7 +41,7 @@ public:
     explicit PartialView(PastelProcessor& p) : proc(p) {}
     void refresh() { inst = proc.getInstrument(); repaint(); }
     void paint(juce::Graphics&) override;
-    void mouseDown(const juce::MouseEvent& e) override { edit(e.position); }
+    void mouseDown(const juce::MouseEvent& e) override { proc.pushUndo(); edit(e.position); }
     void mouseDrag(const juce::MouseEvent& e) override { edit(e.position); }
     void mouseDoubleClick(const juce::MouseEvent&) override { proc.resetPartialGains(); repaint(); }
 

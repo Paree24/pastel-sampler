@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "FactoryPresets.h"
 #include <cstdlib>
 
 namespace
@@ -20,6 +21,7 @@ PastelProcessor::PastelProcessor()
     for (auto& g : partialGains) g.store(1.0f);
     for (auto* id : { &PP::LOOP_ON, &PP::LOOP_TYPE, &PP::S_XFADE, &PP::QUALITY, &PP::ALGO })
         apvts.addParameterListener(*id, this);
+    for (auto* prm : getParameters()) prm->addListener(this); // gesture starts feed undo
     startTimerHz(15);
     // dev hook: preload a sample (used for screenshots / smoke tests)
     if (auto* f = std::getenv("PASTEL_AUTOLOAD"); f != nullptr && *f != 0) loadSample(f);
@@ -33,6 +35,7 @@ PastelProcessor::~PastelProcessor()
     previewPool.removeAllJobs(true, 10000);
     for (auto* id : { &PP::LOOP_ON, &PP::LOOP_TYPE, &PP::S_XFADE, &PP::QUALITY, &PP::ALGO })
         apvts.removeParameterListener(*id, this);
+    for (auto* prm : getParameters()) prm->removeListener(this);
 }
 
 bool PastelProcessor::isBusesLayoutSupported(const BusesLayout& l) const
@@ -51,6 +54,7 @@ void PastelProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     fx.reset();
     limiter.prepare(sampleRate);
     setLatencySamples(limiter.latency());
+    arp.prepare(sampleRate);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +83,7 @@ EngineParams PastelProcessor::snapshotParams() const
     auto b = [&](const juce::String& id) { return v(id) > 0.5f; };
     auto i = [&](const juce::String& id) { return (int) std::lround(v(id)); };
     p.rootMidi = rootMidiFor(engine.instrument());
+    p.rootOverride = b(PP::ROOTOVR);
     p.rootHz = Analysis::midiToHz(p.rootMidi);
     p.engine = juce::jlimit(0, 4, i(PP::ENGINE));
     p.gPos = v(PP::G_POS); p.gScan = v(PP::G_SCAN); p.gSizeMs = v(PP::G_SIZE); p.gDensity = v(PP::G_DENS);
@@ -97,10 +102,21 @@ EngineParams PastelProcessor::snapshotParams() const
     p.mode = i(PP::V_MODE); p.voices = i(PP::V_VOICES); p.glideMs = v(PP::V_GLIDE);
     p.bendRange = i(PP::V_BEND); p.spread = v(PP::V_SPREAD); p.formant = b(PP::V_FORMANT);
     p.keepLen = b(PP::V_KEEPLEN); p.rr = b(PP::V_RR); p.mono = b(PP::V_MONO);
-    p.tuning = i(PP::V_TUNING); p.a4 = PP::a4Values[juce::jlimit(0, 9, i(PP::V_A4))];
+    p.tuning = i(PP::V_TUNING); p.tonic = juce::jlimit(0, 11, i(PP::V_TONIC)); p.a4 = PP::a4Values[juce::jlimit(0, 9, i(PP::V_A4))];
     p.loKey = i(PP::V_LOKEY); p.hiKey = i(PP::V_HIKEY);
     p.volumeDb = v(PP::VOLUME);
     for (size_t k = 0; k < 128; ++k) p.partialGains[k] = partialGains[k].load();
+    // modulation: LFO rates (synced = a note division at the host tempo) + matrix routes
+    for (int k = 0; k < 2; ++k)
+    {
+        p.lfoWave[k] = juce::jlimit(0, 4, i(PP::L_WAVE[k]));
+        p.lfoHz[k] = b(PP::L_SYNC[k])
+            ? (float) (hostBpm / 60.0 / PP::lfoDivBeats[juce::jlimit(0, 9, i(PP::L_DIV[k]))])
+            : v(PP::L_RATE[k]);
+    }
+    for (int k = 0; k < PP::kModSlots; ++k)
+        p.routes[(size_t) k] = { juce::jlimit(0, (int) MS_COUNT - 1, i(PP::modSrcId(k))), v(PP::modAmtId(k)),
+                                 juce::jlimit(0, (int) MD_COUNT - 1, i(PP::modDstId(k))) };
     return p;
 }
 
@@ -129,6 +145,12 @@ void PastelProcessor::parameterChanged(const juce::String& id, float)
 {
     if (id == PP::ALGO) redetectPending = true;
     rebuildPending = true;
+}
+
+void PastelProcessor::parameterGestureChanged(int, bool starting)
+{
+    // a knob drag / switch click from the editor: snapshot the state it starts from
+    if (starting && juce::MessageManager::existsAndIsCurrentThread()) pushUndo();
 }
 
 void PastelProcessor::timerCallback()
@@ -253,17 +275,15 @@ PastelProcessor::BuildOutput PastelProcessor::build(const BuildInput& in, std::a
                  + ":" + juce::String(e.start) + ":" + juce::String(e.end);
     const auto* prev = in.previous.get();
     const bool sameAudio = prev != nullptr && prev->audioKey == inst->audioKey;
+    out.keepVoices = sameAudio;
     if (!in.redetect && sameAudio && prev->anaKey == inst->anaKey)
     {
         inst->pitch = prev->pitch;
-        inst->track = prev->track;
     }
     else
     {
         const int a0 = (int) e.anaStart, a1 = (int) e.anaEnd;
         inst->pitch = Analysis::detectPitch(mono.data() + a0, a1 - a0, sr, in.algo);
-        inst->track = Analysis::trackPitch(mono.data() + e.start, e.end - e.start, sr);
-        inst->track.firstSample += e.start;
     }
     setP(0.45f);
 
@@ -351,13 +371,14 @@ void PastelProcessor::install(BuildOutput out)
     {
         const juce::SpinLock::ScopedLockType l(pendingLock);
         pendingInst = out.inst;
+        pendingKeep = out.keepVoices;
         pendingFlag = true;
     }
     if (!asyncLoads)
     {
         // no audio callback running in the harness: swap directly
         const juce::SpinLock::ScopedLockType l(pendingLock);
-        engine.setInstrument(std::move(pendingInst));
+        engine.setInstrument(std::move(pendingInst), pendingKeep);
         pendingInst = nullptr;
         pendingFlag = false;
     }
@@ -428,7 +449,11 @@ void PastelProcessor::loadInternal(const juce::String& path, const SampleEdits* 
     });
 }
 
-void PastelProcessor::loadSample(const juce::String& path) { loadInternal(path, nullptr, !asyncLoads); }
+void PastelProcessor::loadSample(const juce::String& path)
+{
+    pushUndo();
+    loadInternal(path, nullptr, !asyncLoads);
+}
 
 bool PastelProcessor::loadSampleSync(const juce::String& path)
 {
@@ -462,6 +487,7 @@ void PastelProcessor::rebuildSync(bool redetect)
 
 void PastelProcessor::setEdits(const SampleEdits& e, bool rebuildNow, bool redetect)
 {
+    pushUndo();
     {
         const juce::ScopedLock l(stateLock);
         edits = e;
@@ -521,6 +547,7 @@ void PastelProcessor::untrim()
 void PastelProcessor::findLoopNow()
 {
     if (decoded == nullptr) return;
+    pushUndo();
     // finding a loop also switches looping on
     if (auto* loopP = apvts.getParameter(PP::LOOP_ON); loopP != nullptr && loopP->getValue() < 0.5f)
         loopP->setValueNotifyingHost(1.0f);
@@ -548,6 +575,7 @@ void PastelProcessor::findLoopNow()
 
 void PastelProcessor::resetPartialGains()
 {
+    pushUndo();
     for (auto& g : partialGains) g.store(1.0f);
     sendChangeMessage();
 }
@@ -630,16 +658,41 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     buffer.clear();
     keyboardState.processNextMidiBuffer(midi, 0, num, true);
 
+    // host tempo / position: LFO sync + the arp grid
+    MidiArp::Host host;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            if (auto bpm = pos->getBpm()) host.bpm = *bpm;
+            host.playing = pos->getIsPlaying();
+            if (auto ppq = pos->getPpqPosition()) { host.ppq = *ppq; host.hasPpq = true; }
+        }
+    hostBpm = host.bpm;
+    {
+        auto v = [&](const juce::String& id) { return apvts.getRawParameterValue(id)->load(); };
+        MidiArp::Settings as;
+        as.on = v(PP::ARP_ON) > 0.5f;
+        as.mode = (int) v(PP::ARP_MODE);
+        as.stepBeats = MidiArp::divBeats((int) v(PP::ARP_DIV));
+        as.octaves = (int) v(PP::ARP_OCT);
+        as.gate = v(PP::ARP_GATE);
+        as.swing = v(PP::ARP_SWING);
+        as.latch = v(PP::ARP_LATCH) > 0.5f;
+        as.playedVel = v(PP::ARP_VEL) > 0.5f;
+        arp.process(midi, num, as, host);
+    }
+
     if (pendingFlag.load())
     {
         const juce::SpinLock::ScopedTryLockType l(pendingLock);
         if (l.isLocked())
         {
-            retire(engine.setInstrument(std::move(pendingInst)));
+            retire(engine.setInstrument(std::move(pendingInst), pendingKeep));
             pendingInst = nullptr;
             pendingFlag = false;
         }
     }
+    while (auto done = engine.takeRetired()) retire(std::move(done)); // rebuilt-away instruments whose notes ended
     if (panicRequested.exchange(false)) engine.allNotesOff(true);
 
     const EngineParams p = snapshotParams();
@@ -679,6 +732,9 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             else if (m.isSustainPedalOff()) engine.setSustain(false, p);
             else if (m.isAllSoundOff()) engine.allNotesOff(true);
             else if (m.isAllNotesOff()) engine.allNotesOff(false);
+            else if (m.isControllerOfType(1)) engine.setModWheel(m.getControllerValue() / 127.0f);
+            else if (m.isChannelPressure()) engine.setAftertouch(m.getChannelPressureValue() / 127.0f);
+            else if (m.isAftertouch()) engine.setAftertouch(m.getAfterTouchValue() / 127.0f); // poly AT drives the same source
         }
         if (pos < num) engine.render(*target, pos, num - pos, p);
 
@@ -688,20 +744,8 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             if (auto pos = ph->getPosition())
                 if (auto bpm = pos->getBpm()) dp.bpm = *bpm;
         fx.process(*target, dp);
-        {
-            // master peak limiter, -0.3 dBFS ceiling (constant latency whether on or off)
-            float* l = target->getWritePointer(0);
-            float* r = target->getWritePointer(1);
-            limiter.process(l, r, num, 0.9661f, apvts.getRawParameterValue(PP::LIMIT)->load() > 0.5f);
-            limiterGr = limiter.reductionDb();
-            float pkL = 0, pkR = 0;
-            for (int i = 0; i < num; ++i) { pkL = juce::jmax(pkL, std::abs(l[i])); pkR = juce::jmax(pkR, std::abs(r[i])); }
-            const float decay = std::pow(0.5f, (float) num / (float) (hostRate * 0.08));
-            meters[0] = juce::jmax(pkL, meters[0].load() * decay);
-            meters[1] = juce::jmax(pkR, meters[1].load() * decay);
-        }
-
-        // browser preview: the raw file, after the effects (dry audition)
+        // browser preview: the raw file, after the effects (dry audition) but before the
+        // limiter + meters, so a hot file can neither clip the output nor hide from the meter
         if (previewStopReq.exchange(false))
         {
             retire(std::move(previewCur));
@@ -745,6 +789,19 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             }
             previewProgress = previewCur != nullptr ? (float) (previewPos / len) : 0.0f;
         }
+        {
+            // master peak limiter, -0.3 dBFS ceiling (constant latency whether on or off)
+            float* l = target->getWritePointer(0);
+            float* r = target->getWritePointer(1);
+            limiter.process(l, r, num, 0.9661f, apvts.getRawParameterValue(PP::LIMIT)->load() > 0.5f);
+            float pkL = 0, pkR = 0;
+            for (int i = 0; i < num; ++i) { pkL = juce::jmax(pkL, std::abs(l[i])); pkR = juce::jmax(pkR, std::abs(r[i])); }
+            const float decay = std::pow(0.5f, (float) num / (float) (hostRate * 0.08));
+            limiterGr = juce::jmax(limiter.reductionDb(), limiterGr.load() * decay); // peak hold for the readout
+            meters[0] = juce::jmax(pkL, meters[0].load() * decay);
+            meters[1] = juce::jmax(pkR, meters[1].load() * decay);
+        }
+
         if (buffer.getNumChannels() == 1)
         {
             float* oL = target->getWritePointer(0);
@@ -793,6 +850,21 @@ void PastelProcessor::applyStateTree(const juce::ValueTree& tree)
     g.addTokens(s.getProperty("partialGains").toString(), ",", "");
     for (int k = 0; k < 128; ++k)
         partialGains[(size_t) k].store(k < g.size() ? juce::jlimit(0.0f, 4.0f, g[k].getFloatValue()) : 1.0f);
+    const SampleEdits e = editsFromTree(s);
+    const juce::String path = s.getProperty("path").toString();
+    if (path.isNotEmpty())
+    {
+        if (juce::File(path).existsAsFile()) loadInternal(path, &e, !asyncLoads);
+        else
+        {
+            status = "Missing sample: " + path;
+            sendChangeMessage();
+        }
+    }
+}
+
+SampleEdits PastelProcessor::editsFromTree(const juce::ValueTree& s)
+{
     SampleEdits e;
     e.reverse = s.getProperty("reverse", false);
     e.normalize = s.getProperty("normalize", false);
@@ -804,16 +876,69 @@ void PastelProcessor::applyStateTree(const juce::ValueTree& tree)
     e.loopEnd = s.getProperty("loopEnd", -1);
     e.anaStart = s.getProperty("anaStart", -1.0);
     e.anaEnd = s.getProperty("anaEnd", -1.0);
-    const juce::String path = s.getProperty("path").toString();
-    if (path.isNotEmpty())
+    return e;
+}
+
+// ---------------------------------------------------------------------------
+// undo / redo (snapshot stack, as in the Pastel drum sampler)
+void PastelProcessor::pushUndo()
+{
+    if (applyingUndo) return;
+    auto snap = makeStateTree();
+    if (!undoStack.empty() && undoStack.back().isEquivalentTo(snap)) return; // nothing changed since
+    undoStack.push_back(std::move(snap));
+    if (undoStack.size() > 50) undoStack.erase(undoStack.begin());
+    redoStack.clear(); // a new edit forks history
+}
+
+void PastelProcessor::undo()
+{
+    if (undoStack.empty()) return;
+    auto v = undoStack.back();
+    undoStack.pop_back();
+    redoStack.push_back(makeStateTree());
+    applyUndoState(v);
+}
+
+void PastelProcessor::redo()
+{
+    if (redoStack.empty()) return;
+    auto v = redoStack.back();
+    redoStack.pop_back();
+    undoStack.push_back(makeStateTree());
+    applyUndoState(v);
+}
+
+void PastelProcessor::applyUndoState(const juce::ValueTree& tree)
+{
+    const juce::ScopedValueSetter<bool> svs(applyingUndo, true);
+    const auto s = tree.getChildWithName("SAMPLE");
+    juce::String path, cur;
+    if (s.isValid()) path = s.getProperty("path").toString();
     {
-        if (juce::File(path).existsAsFile()) loadInternal(path, &e, !asyncLoads);
-        else
-        {
-            status = "Missing sample: " + path;
-            sendChangeMessage();
-        }
+        const juce::ScopedLock l(stateLock);
+        cur = samplePath;
     }
+    if (path.isEmpty() || path != cur || decoded == nullptr)
+    {
+        applyStateTree(tree); // another file: load it (restores its edits)
+        sendChangeMessage();
+        return;
+    }
+    // same file: parameters + partial gains, then the edits without decoding again
+    auto copy = tree.createCopy();
+    copy.removeChild(copy.getChildWithName("SAMPLE"), nullptr);
+    apvts.replaceState(copy);
+    juce::StringArray g;
+    g.addTokens(s.getProperty("partialGains").toString(), ",", "");
+    for (int k = 0; k < 128; ++k)
+        partialGains[(size_t) k].store(k < g.size() ? juce::jlimit(0.0f, 4.0f, g[k].getFloatValue()) : 1.0f);
+    const SampleEdits e = editsFromTree(s), now = getEdits();
+    const bool same = e.reverse == now.reverse && e.normalize == now.normalize && e.cropStart == now.cropStart
+                   && e.cropEnd == now.cropEnd && e.start == now.start && e.end == now.end && e.loopStart == now.loopStart
+                   && e.loopEnd == now.loopEnd && e.anaStart == now.anaStart && e.anaEnd == now.anaEnd;
+    if (!same) setEdits(e, true, false);
+    sendChangeMessage();
 }
 
 void PastelProcessor::getStateInformation(juce::MemoryBlock& dest)
@@ -844,16 +969,135 @@ bool PastelProcessor::loadPreset(const juce::File& f)
 {
     auto xml = juce::XmlDocument::parse(f);
     if (xml == nullptr || !xml->hasTagName(apvts.state.getType())) return false;
+    pushUndo();
     applyStateTree(juce::ValueTree::fromXml(*xml));
     return true;
 }
 
 void PastelProcessor::resetToInit()
 {
+    pushUndo();
+    const juce::ScopedValueSetter<bool> svs(applyingUndo, true); // one step for the whole reset
     for (auto* prm : getParameters())
         if (auto* r = dynamic_cast<juce::RangedAudioParameter*>(prm))
             r->setValueNotifyingHost(r->getDefaultValue());
     resetPartialGains();
+}
+
+void PastelProcessor::applyFactoryPreset(int index)
+{
+    const auto& all = FactoryPresets::all();
+    if (index < 0 || index >= (int) all.size()) return;
+    pushUndo();
+    const juce::ScopedValueSetter<bool> svs(applyingUndo, true); // one step for the whole preset
+    for (auto* prm : getParameters())
+        if (auto* r = dynamic_cast<juce::RangedAudioParameter*>(prm))
+            if (paramGroup(r->getParameterID()) != RG_ROOT)
+                r->setValueNotifyingHost(r->getDefaultValue());
+    for (auto& [id, value] : all[(size_t) index].values)
+        if (auto* r = apvts.getParameter(id))
+            r->setValueNotifyingHost(r->convertTo0to1(value));
+    resetPartialGains();
+    setPresetName(all[(size_t) index].name);
+}
+
+// which randomize group a parameter belongs to (-1: never randomized)
+int PastelProcessor::paramGroup(const juce::String& id)
+{
+    using namespace PP;
+    if (id == ROOTOVR || id == ROOTNOTE || id == ROOTFINE || id == ALGO) return RG_ROOT;
+    if (id == ENGINE || id.startsWith("samp") || id.startsWith("add") || id.startsWith("spec")
+        || id.startsWith("grain") || id == LOOP_ON || id == LOOP_TYPE)
+        return id == S_INTERP ? -1 : RG_ENGINE;
+    if (id.startsWith("env")) return RG_ENV;
+    if (id.startsWith("filt")) return RG_FILTER;
+    if (id == V_MODE || id == V_GLIDE || id == V_SPREAD || id == V_RR || id == V_FORMANT || id.startsWith("arp"))
+        return RG_VOICE;
+    if (id.startsWith("lfo") || id.startsWith("mod")) return RG_MOD;
+    for (auto* fx : { "ch", "ph", "fl", "di", "sa", "rv", "dl" })
+        if (id.startsWith(fx)) return RG_FX;
+    return -1; // volume, quality, limiter, tuning, key range, voices, mono out, keep length...
+}
+
+void PastelProcessor::setGroupLocked(int g, bool locked)
+{
+    int m = getRandLocks();
+    m = locked ? (m | (1 << g)) : (m & ~(1 << g));
+    apvts.state.setProperty("randLocks", m, nullptr);
+}
+
+void PastelProcessor::randomize()
+{
+    pushUndo();
+    const juce::ScopedValueSetter<bool> svs(applyingUndo, true);
+    juce::Random rng;
+    auto range = [](const juce::String& id, float& lo, float& hi)
+    {
+        // plain-value limits that keep a random patch playable
+        using namespace PP;
+        if (id == S_LEVEL || id == A_LEVEL || id == P_LEVEL || id == G_LEVEL) { lo = -12; hi = 0; }
+        else if (id == E_A) { lo = 0.5f; hi = 600; }
+        else if (id == E_R) { lo = 40; hi = 3000; }
+        else if (id == E_S) { lo = 0.2f; hi = 1; }
+        else if (id == F_CUT) { lo = 300; hi = 14000; }
+        else if (id == F_RES) { lo = 0; hi = 0.7f; }
+        else if (id == F_DRIVE) { lo = 0; hi = 0.5f; }
+        else if (id == G_JITTER) { lo = 0; hi = 60; }
+        else if (id == V_GLIDE) { lo = 0; hi = 300; }
+        else if (id.endsWith("mix")) { lo = 0; hi = 0.5f; }
+        else if (id == DLFB || id == FLFB || id == PHFB) { lo = 0; hi = 0.6f; }
+        else if (id.startsWith("mod") && id.endsWith("amt")) { lo = -0.5f; hi = 0.5f; }
+    };
+    for (auto* prm : getParameters())
+    {
+        auto* r = dynamic_cast<juce::RangedAudioParameter*>(prm);
+        if (r == nullptr) continue;
+        const auto id = r->getParameterID();
+        const int g = paramGroup(id);
+        if (g < 0 || g == RG_ROOT || isGroupLocked(g)) continue;
+        float norm;
+        if (dynamic_cast<juce::AudioParameterBool*>(r) != nullptr)
+        {
+            // effects and the arp switch on now and then; other switches flip a coin
+            const bool sparse = g == RG_FX || id == PP::ARP_ON || id == PP::ARP_LATCH;
+            norm = rng.nextFloat() < (sparse ? 0.25f : 0.5f) ? 1.0f : 0.0f;
+        }
+        else if (dynamic_cast<juce::AudioParameterChoice*>(r) != nullptr && id.startsWith("mod") && id.endsWith("src"))
+            norm = rng.nextFloat() < 0.35f ? rng.nextFloat() : 0.0f; // most matrix slots stay empty
+        else
+        {
+            const auto& nr = r->getNormalisableRange();
+            float lo = nr.start, hi = nr.end;
+            range(id, lo, hi);
+            norm = r->convertTo0to1(lo + rng.nextFloat() * (hi - lo));
+        }
+        r->setValueNotifyingHost(norm);
+    }
+    if (!isGroupLocked(RG_SAMPLE))
+    {
+        // a random sound file from the browser folder
+        juce::Array<juce::File> files;
+        for (auto& e : library.listEntries())
+            if (!e.isDir) files.add(juce::File(e.path));
+        if (!files.isEmpty()) loadSample(files[rng.nextInt(files.size())].getFullPathName());
+    }
+    setPresetName("Random");
+}
+
+void PastelProcessor::mutate(float amount)
+{
+    pushUndo();
+    const juce::ScopedValueSetter<bool> svs(applyingUndo, true);
+    juce::Random rng;
+    for (auto* prm : getParameters())
+    {
+        auto* r = dynamic_cast<juce::RangedAudioParameter*>(prm);
+        if (r == nullptr || dynamic_cast<juce::AudioParameterFloat*>(r) == nullptr) continue; // nudge continuous values only
+        const int g = paramGroup(r->getParameterID());
+        if (g < 0 || g == RG_ROOT || isGroupLocked(g)) continue;
+        const float n = juce::jlimit(0.0f, 1.0f, r->getValue() + (rng.nextFloat() * 2.0f - 1.0f) * amount);
+        r->setValueNotifyingHost(n);
+    }
 }
 
 juce::AudioProcessorEditor* PastelProcessor::createEditor() { return new PastelEditor(*this); }

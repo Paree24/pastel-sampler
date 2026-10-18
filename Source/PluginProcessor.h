@@ -8,10 +8,12 @@
 #include "Limiter.h"
 #include "FileLibrary.h"
 #include "Params.h"
+#include "MidiArp.h"
 
 class PastelProcessor : public juce::AudioProcessor,
                         public juce::ChangeBroadcaster,
                         private juce::AudioProcessorValueTreeState::Listener,
+                        private juce::AudioProcessorParameter::Listener,
                         private juce::Timer
 {
 public:
@@ -79,6 +81,33 @@ public:
     bool savePreset(const juce::File& f);
     bool loadPreset(const juce::File& f);
     void resetToInit();
+    // factory recipes (FactoryPresets.h): played on the loaded sample, root kept; one undo step
+    void applyFactoryPreset(int index);
+    juce::String getPresetName() const { return apvts.state.getProperty("presetName", "Init").toString(); }
+    void setPresetName(const juce::String& n) { apvts.state.setProperty("presetName", n, nullptr); }
+
+    // ---- randomize / mutate (one undo step each) ----
+    // Lock groups: a locked group is never touched. Sample + Root are locked by default.
+    enum RandGroup { RG_SAMPLE, RG_ROOT, RG_ENGINE, RG_ENV, RG_FILTER, RG_VOICE, RG_FX, RG_MOD, RG_COUNT };
+    static juce::StringArray randGroupNames() { return { "Sample", "Root", "Engine", "Envelope", "Filter", "Voice + Arp", "Effects", "Mod" }; }
+    bool isGroupLocked(int g) const { return (getRandLocks() >> g) & 1; }
+    void setGroupLocked(int g, bool locked);
+    void randomize();
+    void mutate(float amount = 0.15f);
+    static int paramGroup(const juce::String& id); // -1 = never randomized (volume, tuning, quality...)
+
+    // modulation readouts (UI)
+    float getLfoValue(int k) const { return engine.lfoValue(k); }
+    bool isArpRunning() const { return arp.isRunning(); }
+
+    // ---- undo / redo: whole-state snapshots (message thread) ----
+    // Taken before every edit: a knob / switch gesture, a sample load or edit, a preset,
+    // randomize / mutate. Undoing within the same file re-applies edits without reloading it.
+    void pushUndo();
+    void undo();
+    void redo();
+    bool canUndo() const { return !undoStack.empty(); }
+    bool canRedo() const { return !redoStack.empty(); }
 
     // ---- UI helpers ----
     void auditionNoteOn(int note, float vel) { keyboardState.noteOn(1, note, vel); }
@@ -122,6 +151,7 @@ private:
     {
         std::shared_ptr<Instrument> inst;
         SampleEdits edits;
+        bool keepVoices = false; // same audio rebuilt: sounding notes finish on the old build
     };
 
     static std::shared_ptr<const Decoded> decode(juce::AudioFormatManager& fm, const juce::String& path, juce::String& error);
@@ -131,6 +161,12 @@ private:
     void startJob(std::function<void()> job);
 
     void parameterChanged(const juce::String& id, float) override;
+    void parameterValueChanged(int, float) override {}
+    void parameterGestureChanged(int, bool starting) override;
+    std::vector<juce::ValueTree> undoStack, redoStack;
+    bool applyingUndo = false;
+    void applyUndoState(const juce::ValueTree& tree);
+    static SampleEdits editsFromTree(const juce::ValueTree& s);
     void timerCallback() override;
     void retire(std::shared_ptr<const void> p);
 
@@ -141,9 +177,13 @@ private:
     double hostRate = 44100.0;
 
     // instrument handoff to the audio thread
+    int getRandLocks() const { return (int) apvts.state.getProperty("randLocks", (1 << RG_SAMPLE) | (1 << RG_ROOT)); }
+    MidiArp arp;
+    double hostBpm = 120.0; // audio thread: the last block's tempo (LFO sync)
     juce::SpinLock pendingLock;
     std::shared_ptr<const Instrument> pendingInst;
     std::atomic<bool> pendingFlag { false };
+    bool pendingKeep = false; // guarded by pendingLock
     std::shared_ptr<const Instrument> uiInstrument;
     std::shared_ptr<const Decoded> decoded;
     SampleEdits edits;

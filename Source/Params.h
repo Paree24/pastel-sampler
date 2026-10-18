@@ -36,7 +36,7 @@ namespace PP
     inline const juce::String V_MODE = "voiceMode", V_VOICES = "voices", V_GLIDE = "glide",
                               V_BEND = "bendRange", V_SPREAD = "spread", V_FORMANT = "formant",
                               V_KEEPLEN = "keepLength", V_RR = "roundRobin", V_MONO = "monoOut",
-                              V_TUNING = "tuning", V_A4 = "a4", V_LOKEY = "lowKey", V_HIKEY = "highKey";
+                              V_TUNING = "tuning", V_TONIC = "tuningTonic", V_A4 = "a4", V_LOKEY = "lowKey", V_HIKEY = "highKey";
     // effects + master (same IDs / ranges as the Pastel Soundfont Player)
     inline const juce::String CHON = "chon", CHMODE = "chmode", CHRATE = "chrate", CHDEPTH = "chdepth", CHMIX = "chmix";
     inline const juce::String PHON = "phon", PHRATE = "phrate", PHDEPTH = "phdepth", PHFB = "phfb", PHMIX = "phmix";
@@ -46,6 +46,27 @@ namespace PP
     inline const juce::String RVON = "rvon", RVSIZE = "rvsize", RVDAMP = "rvdamp", RVMIX = "rvmix";
     inline const juce::String DLON = "dlon", DLTIME = "dltime", DLFB = "dlfb", DLMIX = "dlmix", DLSYNC = "dlsync", DLDIV = "dldiv";
     inline const juce::String LIMIT = "limit";
+    // arpeggiator (MIDI arp ahead of the engine)
+    inline const juce::String ARP_ON = "arpOn", ARP_MODE = "arpMode", ARP_DIV = "arpDiv", ARP_OCT = "arpOct",
+                              ARP_GATE = "arpGate", ARP_SWING = "arpSwing", ARP_LATCH = "arpLatch", ARP_VEL = "arpVel";
+    inline const juce::StringArray arpModes { "Up", "Down", "Up-Down", "Random" };
+    inline const juce::StringArray arpDivs { "1/4", "1/4T", "1/4 D", "1/8", "1/8T", "1/8 D",
+                                             "1/16", "1/16T", "1/16 D", "1/32", "1/32T" };
+    // modulation: 2 LFOs + an 8-slot matrix (source, amount, destination), after the Monosynth matrix
+    inline const juce::String L_RATE[2] { "lfo1Rate", "lfo2Rate" }, L_WAVE[2] { "lfo1Wave", "lfo2Wave" },
+                              L_SYNC[2] { "lfo1Sync", "lfo2Sync" }, L_DIV[2] { "lfo1Div", "lfo2Div" };
+    inline const juce::StringArray lfoWaves { "Sine", "Triangle", "Saw", "Square", "S&H" };
+    inline const juce::StringArray lfoDivs { "4 bars", "2 bars", "1 bar", "1/2", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/32" };
+    inline const double lfoDivBeats[] { 16.0, 8.0, 4.0, 2.0, 1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25, 0.125 };
+    static constexpr int kModSlots = 8;
+    inline juce::String modSrcId(int i) { return "mod" + juce::String(i) + "src"; }
+    inline juce::String modAmtId(int i) { return "mod" + juce::String(i) + "amt"; }
+    inline juce::String modDstId(int i) { return "mod" + juce::String(i) + "dst"; }
+    // order = ModSrc / ModDst in SynthEngine.h
+    inline const juce::StringArray modSources { "None", "LFO 1", "LFO 2", "Mod Wheel", "Aftertouch", "Velocity", "Key", "Random" };
+    inline const juce::StringArray modDests { "None", "Pitch", "Cutoff", "Resonance", "Level", "Pan",
+                                              "Grain Pos", "Grain Size", "Grain Density", "Grain Spray",
+                                              "Formant Shift", "Smear", "Freeze", "Tilt" };
     inline const juce::StringArray chorusModes { "Manual", "Vintage I", "Vintage II", "Wide" };
     inline const juce::StringArray satModes { "Tape", "Tube" };
     inline const juce::StringArray delayDivs { "1/4", "1/8", "1/8 Dotted", "1/4 Triplet", "1/16", "1/2" };
@@ -60,7 +81,9 @@ namespace PP
     inline const juce::StringArray filterTypeChoices { "Low Pass", "High Pass", "Band Pass" };
     inline const juce::StringArray slopeChoices { "12 dB", "24 dB" };
     inline const juce::StringArray modeChoices { "Poly", "Mono", "Legato" };
-    inline const juce::StringArray tuningChoices { "12-TET", "Just (C)", "Pythagorean (C)" };
+    inline const juce::StringArray tuningChoices { "12-TET", "Just", "Pythagorean" };
+    // tonic of the Just / Pythagorean scales (pitch class)
+    inline const juce::StringArray tonicChoices { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
     inline const juce::StringArray a4Choices { "415 Hz", "430 Hz", "432 Hz", "435 Hz", "438 Hz",
                                                "440 Hz", "442 Hz", "443 Hz", "444 Hz", "446 Hz" };
     inline const float a4Values[] { 415, 430, 432, 435, 438, 440, 442, 443, 444, 446 };

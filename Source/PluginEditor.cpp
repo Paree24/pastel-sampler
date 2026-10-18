@@ -136,7 +136,8 @@ void PastelEditor::button(juce::TextButton& b, juce::Rectangle<int> r, const juc
 
 // ============================================================ construction
 PastelEditor::PastelEditor(PastelProcessor& p)
-    : juce::AudioProcessorEditor(p), proc(p), preview(p), wave(p), partials(p), spectrum(p), rootDisplay(p), piano(p)
+    : juce::AudioProcessorEditor(p), proc(p), presetBrowser(p, lnf), preview(p), wave(p), partials(p), spectrum(p),
+      rootDisplay(p), piano(p)
 {
     juce::LookAndFeel::setDefaultLookAndFeel(&lnf);
     setLookAndFeel(&lnf);
@@ -145,14 +146,20 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     view.painter = [this](juce::Graphics& g) { paintView(g); };
 
     // ---------------- header ----------------
-    button(loadBtn, { 520, 22, 76, 30 }, "Open an audio file");
-    button(prevBtn, { 602, 22, 30, 30 }, "Previous file in folder");
-    button(nextBtn, { 638, 22, 30, 30 }, "Next file in folder");
-    button(panicBtn, { 674, 22, 70, 30 }, "Stop all sound");
-    button(mainTab, { 764, 22, 80, 30 }, "Sample, engines, root, envelope and filter");
-    button(fxTab, { 850, 22, 96, 30 }, "Effects and master");
+    button(loadBtn, { 520, 22, 60, 30 }, "Open an audio file");
+    button(prevBtn, { 584, 22, 28, 30 }, "Previous file in folder");
+    button(nextBtn, { 616, 22, 28, 30 }, "Next file in folder");
+    button(panicBtn, { 648, 22, 62, 30 }, "Stop all sound");
+    button(mainTab, { 716, 22, 58, 30 }, "Sample, engines, root, envelope and filter");
+    button(fxTab, { 778, 22, 76, 30 }, "Effects and master");
+    button(modTab, { 858, 22, 56, 30 }, "LFOs, mod matrix, arpeggiator, randomize");
+    button(undoBtn, { 932, 22, 52, 30 }, "Undo the last change (Ctrl+Z)");
+    button(redoBtn, { 988, 22, 52, 30 }, "Redo what UNDO took back (Ctrl+Shift+Z)");
+    undoBtn.onClick = [this] { proc.undo(); afterStateJump(); };
+    redoBtn.onClick = [this] { proc.redo(); afterStateJump(); };
     mainTab.onClick = [this] { setPage(0); };
     fxTab.onClick = [this] { setPage(1); };
+    modTab.onClick = [this] { setPage(2); };
     loadBtn.onClick = [this]
     {
         chooser = std::make_unique<juce::FileChooser>("Load sample", juce::File(proc.library.getCurrentDir()), FileLibrary::wildcard());
@@ -169,53 +176,16 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     nextBtn.onClick = [this] { stepFile(1); };
     panicBtn.onClick = [this] { proc.panic(); proc.stopPreview(); };
 
-    presetBox.setBounds(980, 30, 180, 24);
-    view.addAndMakeVisible(presetBox);
     auto* presetLbl = labels.emplace_back(std::make_unique<juce::Label>("", "Preset")).get();
     presetLbl->setFont(lnf.uiFont(11.0f));
     presetLbl->setColour(juce::Label::textColourId, PC::textDim);
-    presetLbl->setBounds(978, 15, 120, 13);
+    presetLbl->setBounds(1050, 15, 100, 13);
     view.addAndMakeVisible(presetLbl);
-    presetBox.onChange = [this]
-    {
-        const int id = presetBox.getSelectedId();
-        if (id == 0) return;
-        if (id == 1) { proc.resetToInit(); presetName = "Init"; }
-        else if (id >= 100)
-        {
-            juce::Array<juce::File> files = PastelProcessor::presetFolder().findChildFiles(juce::File::findFiles, false, "*.pastelsampler");
-            files.sort();
-            if (id - 100 < files.size() && proc.loadPreset(files[id - 100])) presetName = files[id - 100].getFileNameWithoutExtension();
-        }
-        else if (id == 2)
-        {
-            chooser = std::make_unique<juce::FileChooser>("Save preset", PastelProcessor::presetFolder().getChildFile(presetName + ".pastelsampler"),
-                                                          "*.pastelsampler");
-            chooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
-                                 [this](const juce::FileChooser& fc)
-                                 {
-                                     auto f = fc.getResult();
-                                     if (f == juce::File()) return;
-                                     f = f.withFileExtension("pastelsampler");
-                                     if (proc.savePreset(f)) presetName = f.getFileNameWithoutExtension();
-                                     refreshPresetBox();
-                                 });
-        }
-        else if (id == 3)
-        {
-            chooser = std::make_unique<juce::FileChooser>("Load preset", PastelProcessor::presetFolder(), "*.pastelsampler");
-            chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                                 [this](const juce::FileChooser& fc)
-                                 {
-                                     auto f = fc.getResult();
-                                     if (f.existsAsFile() && proc.loadPreset(f)) presetName = f.getFileNameWithoutExtension();
-                                     refreshPresetBox();
-                                 });
-        }
-        refreshPresetBox();
-    };
+    button(presetBtn, { 1052, 29, 100, 26 }, "Presets: factory sounds for the loaded sample, and your saved presets");
+    presetBtn.onClick = [this] { presetBrowser.setVisible(true); presetBrowser.toFront(true); };
+    presetBrowser.onClose = [this] { presetBrowser.setVisible(false); refreshPresetBox(); };
+    presetBrowser.onLoaded = [this] { afterStateJump(); refreshPresetBox(); };
     refreshPresetBox();
-    choice(PP::QUALITY, "Quality", PP::qualityChoices, { 1170, 30, 76, 24 }).c.setTooltip("Spectral resolution (FFT 1024 / 2048 / 4096)");
 
     // ---------------- browser ----------------
     card("Browser", { 10, 76, 250, 512 });
@@ -371,9 +341,11 @@ PastelEditor::PastelEditor(PastelProcessor& p)
         choice(PP::S_INTERP, "Interpolation", PP::interpChoices, { 290, 392, 180, 24 });
         choice(PP::LOOP_TYPE, "Loop type", PP::loopTypeChoices, { 490, 392, 180, 24 })
             .c.setTooltip("Forward / ping-pong / sustain (loop while held, then play out). LOOP in the Sample card turns it on.");
-        knob(PP::S_XFADE, "Loop xfade", 728, 374, 50);
-        knob(PP::S_TUNE, "Tune", 812, 374, 50);
-        captionSwitch(PP::S_AUTOLOOP, "AUTO LOOP ON LOAD", 900, 390).b.setTooltip("Find a loop automatically when a sample loads");
+        knob(PP::S_START, "Start", 712, 374, 50)
+            .s.setTooltip("Start offset into the selection (up to the loop start when looping); every engine starts here");
+        knob(PP::S_XFADE, "Loop xfade", 784, 374, 50);
+        knob(PP::S_TUNE, "Tune", 856, 374, 50);
+        captionSwitch(PP::S_AUTOLOOP, "AUTO LOOP ON LOAD", 922, 390).b.setTooltip("Find a loop automatically when a sample loads");
         describe("Plays the recording itself, repitched with the chosen interpolation. "
                  "Looping is switched on with LOOP in the Sample card; FIND LOOP places the points.", { 290, 450, 420, 40 });
         endTab(0, b0);
@@ -397,7 +369,9 @@ PastelEditor::PastelEditor(PastelProcessor& p)
         knob(PP::P_FREEZE, "Freeze", 882, 372, 48).s.setTooltip("Slows the sound to a standstill after the attack; 100% holds the tone forever");
         captionSwitch(PP::V_FORMANT, "FORMANT", 722, 446).b.setTooltip("Keep the formants (timbre) of the root on every key");
         describe("Shift: moves formants without changing pitch.\nSmear: blurs the spectrum over time.\n"
-                 "Freeze: slows to a standstill after the attack.", { 760, 444, 198, 64 });
+                 "Freeze: slows to a standstill after the attack.", { 760, 444, 198, 56 });
+        choice(PP::QUALITY, "Quality", PP::qualityChoices, { 762, 524, 96, 24 })
+            .c.setTooltip("Spectral resolution (minimum FFT 1024 / 2048 / 4096)");
         endTab(2, b0);
     }
     {   // GRANULAR
@@ -529,10 +503,12 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     captionSwitch(PP::V_KEEPLEN, "KEEP LENGTH", 572, 638).b.setTooltip("Additive / spectral notes keep the original duration on every key");
     captionSwitch(PP::V_RR, "ROUND ROBIN", 648, 638).b.setTooltip("Micro pitch / start / level variation per note");
     captionSwitch(PP::V_MONO, "MONO", 724, 638).b.setTooltip("Sum the output to mono");
-    choice(PP::V_TUNING, "Tuning", PP::tuningChoices, { 790, 644, 110, 24 });
-    choice(PP::V_A4, "A4", PP::a4Choices, { 908, 644, 84, 24 });
-    choice(PP::V_LOKEY, "Low key", PP::allNoteNames(), { 1000, 644, 70, 24 });
-    choice(PP::V_HIKEY, "High key", PP::allNoteNames(), { 1078, 644, 70, 24 });
+    choice(PP::V_TUNING, "Tuning", PP::tuningChoices, { 790, 644, 100, 24 });
+    tonicChoice = &choice(PP::V_TONIC, "Tonic", PP::tonicChoices, { 896, 644, 52, 24 });
+    tonicChoice->c.setTooltip("Tonic of the Just / Pythagorean scale (12-TET ignores it)");
+    choice(PP::V_A4, "A4", PP::a4Choices, { 954, 644, 74, 24 });
+    choice(PP::V_LOKEY, "Low key", PP::allNoteNames(), { 1034, 644, 56, 24 });
+    choice(PP::V_HIKEY, "High key", PP::allNoteNames(), { 1096, 644, 56, 24 });
 
     // colour key for the engine band above the keyboard
     legend.setBounds(1156, 646, 232, 20);
@@ -562,6 +538,8 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     for (auto* c : view.getChildren())
         if (pageArea.contains(c->getBounds())) mainComps.push_back(c);
     buildEffectsPage();
+    buildModPage();
+    addChildComponent(presetBrowser); // overlay above the scaled view
 
     for (auto it = cards.rbegin(); it != cards.rend(); ++it) (*it)->toBack();
     setPage(0);
@@ -574,6 +552,7 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     instrumentChanged();
 
     const double scale = juce::jlimit(0.6, 1.5, proc.library.getUiScale());
+    setWantsKeyboardFocus(true);
     setResizable(true, true);
     setResizeLimits(kW * 6 / 10, kH * 6 / 10, kW * 3 / 2, kH * 3 / 2);
     if (auto* cons = getConstrainer()) cons->setFixedAspectRatio((double) kW / kH);
@@ -595,6 +574,7 @@ void PastelEditor::resized()
 {
     const float s = (float) getWidth() / (float) kW;
     view.setTransform(juce::AffineTransform::scale(s));
+    presetBrowser.setBounds(getLocalBounds());
     proc.library.setUiScale(s);
 }
 
@@ -657,9 +637,117 @@ void PastelEditor::buildEffectsPage()
     c = cell(7);
     card("Master", c);
     knob(PP::VOLUME, "Volume", c.getCentreX(), c.getY() + 48, 72);
-    captionSwitch(PP::LIMIT, "LIMITER", c.getCentreX() - 40, c.getBottom() - 44).b.setTooltip("Soft limiter above -0.9 dBFS");
+    captionSwitch(PP::LIMIT, "LIMITER", c.getCentreX() - 40, c.getBottom() - 44).b.setTooltip("Master peak limiter: -0.3 dBFS ceiling, 1.5 ms lookahead");
     captionSwitch(PP::V_MONO, "MONO", c.getCentreX() + 40, c.getBottom() - 44);
 
+    parent = &view;
+}
+
+// ============================================================ mod page
+void PastelEditor::buildModPage()
+{
+    modPage.setBounds(0, 0, kW, kH);
+    modPage.setInterceptsMouseClicks(false, true);
+    view.addChildComponent(modPage);
+    parent = &modPage;
+
+    // LFOs
+    for (int k = 0; k < 2; ++k)
+    {
+        const juce::Rectangle<int> c(268, 76 + k * 262, 268, 250);
+        card("LFO " + juce::String(k + 1), c);
+        knob(PP::L_RATE[k], "Rate", c.getX() + 60, c.getY() + 44, 64);
+        choice(PP::L_WAVE[k], "Wave", PP::lfoWaves, { c.getX() + 126, c.getY() + 60, 128, 24 });
+        captionSwitch(PP::L_SYNC[k], "SYNC", c.getX() + 40, c.getBottom() - 44);
+        choice(PP::L_DIV[k], "Division", PP::lfoDivs, { c.getX() + 84, c.getBottom() - 44, c.getWidth() - 98, 24 });
+    }
+    for (int k = 0; k < 2; ++k)
+    {
+        auto& m = lfoMeters[(size_t) k];
+        m.setBounds(268 + 126, 76 + k * 262 + 104, 128, 10);
+        m.setInterceptsMouseClicks(false, false);
+        m.painter = [this, k, &m](juce::Graphics& g)
+        {
+            // live value: a bar from the centre line
+            auto r = m.getLocalBounds().toFloat();
+            g.setColour(PC::track);
+            g.fillRoundedRectangle(r, 2.0f);
+            const float v = juce::jlimit(-1.0f, 1.0f, proc.getLfoValue(k));
+            const float cx = r.getCentreX(), w = v * r.getWidth() * 0.5f;
+            g.setColour(PC::accent);
+            g.fillRect(juce::Rectangle<float>(juce::jmin(cx, cx + w), r.getY(), std::abs(w), r.getHeight()));
+        };
+        modPage.addAndMakeVisible(m);
+    }
+
+    // matrix: 8 rows of source -> amount -> destination
+    {
+        const juce::Rectangle<int> c(544, 76, 562, 512);
+        card("Mod Matrix", c);
+        for (auto [text, x, w] : { std::tuple<const char*, int, int> { "SOURCE", 40, 190 }, { "AMOUNT", 246, 60 },
+                                   { "DESTINATION", 322, 226 } })
+        {
+            auto* hdr = labels.emplace_back(std::make_unique<juce::Label>("", text)).get();
+            hdr->setFont(lnf.uiFont(10.0f));
+            hdr->setColour(juce::Label::textColourId, PC::textDim);
+            hdr->setJustificationType(juce::String(text) == "AMOUNT" ? juce::Justification::centred : juce::Justification::centredLeft);
+            hdr->setBounds(c.getX() + x - 2, c.getY() + 32, w, 14);
+            modPage.addAndMakeVisible(hdr);
+        }
+        for (int k = 0; k < PP::kModSlots; ++k)
+        {
+            const int y = c.getY() + 52 + k * 56;
+            auto* n = labels.emplace_back(std::make_unique<juce::Label>("", juce::String(k + 1))).get();
+            n->setFont(lnf.titleFont(13.0f));
+            n->setColour(juce::Label::textColourId, PC::textDim);
+            n->setBounds(c.getX() + 14, y + 10, 20, 24);
+            modPage.addAndMakeVisible(n);
+            choice(PP::modSrcId(k), {}, PP::modSources, { c.getX() + 40, y + 10, 190, 24 });
+            auto& amt = knob(PP::modAmtId(k), {}, c.getX() + 276, y + 2, 40);
+            amt.s.setTooltip("Amount (double-click: 0)");
+            choice(PP::modDstId(k), {}, PP::modDests, { c.getX() + 322, y + 10, 226, 24 });
+        }
+    }
+
+    // arpeggiator
+    {
+        const juce::Rectangle<int> c(1114, 76, 276, 250);
+        card("Arpeggiator", c);
+        headerSwitch(PP::ARP_ON, c);
+        choice(PP::ARP_MODE, "Mode", PP::arpModes, { c.getX() + 12, c.getY() + 52, 124, 24 });
+        choice(PP::ARP_DIV, "Division", PP::arpDivs, { c.getX() + 144, c.getY() + 52, 120, 24 });
+        knob(PP::ARP_OCT, "Octaves", c.getX() + 46, c.getY() + 96, 46);
+        knob(PP::ARP_GATE, "Gate", c.getX() + 138, c.getY() + 96, 46);
+        knob(PP::ARP_SWING, "Swing", c.getX() + 230, c.getY() + 96, 46);
+        captionSwitch(PP::ARP_LATCH, "LATCH", c.getX() + 92, c.getBottom() - 44).b.setTooltip("Keep the pattern going after the keys go up");
+        captionSwitch(PP::ARP_VEL, "PLAYED VEL", c.getX() + 184, c.getBottom() - 44).b.setTooltip("Notes use each key's velocity (off: fixed)");
+    }
+
+    // randomize with locks
+    {
+        const juce::Rectangle<int> c(1114, 338, 276, 250);
+        card("Randomize", c);
+        button(randomBtn, { c.getX() + 12, c.getY() + 36, 124, 30 }, "New random patch: locked groups stay as they are (one undo step)");
+        button(mutateBtn, { c.getX() + 140, c.getY() + 36, 124, 30 }, "Nudge the unlocked knobs a little (one undo step)");
+        randomBtn.onClick = [this] { proc.randomize(); afterStateJump(); };
+        mutateBtn.onClick = [this] { proc.mutate(); afterStateJump(); };
+        auto* cap = labels.emplace_back(std::make_unique<juce::Label>("", "LOCKED (never changed)")).get();
+        cap->setFont(lnf.uiFont(10.0f));
+        cap->setColour(juce::Label::textColourId, PC::textDim);
+        cap->setBounds(c.getX() + 10, c.getY() + 74, 200, 14);
+        modPage.addAndMakeVisible(cap);
+        const auto names = PastelProcessor::randGroupNames();
+        for (int g = 0; g < PastelProcessor::RG_COUNT; ++g)
+        {
+            auto& b = lockBtns[(size_t) g];
+            b.setButtonText(names[g]);
+            b.setClickingTogglesState(true);
+            b.setToggleState(proc.isGroupLocked(g), juce::dontSendNotification);
+            button(b, { c.getX() + 12 + (g % 2) * 128, c.getY() + 92 + (g / 2) * 36, 124, 30 },
+                   "Lock " + names[g] + ": randomize and mutate leave it alone");
+            b.onClick = [this, g] { proc.setGroupLocked(g, lockBtns[(size_t) g].getToggleState()); };
+        }
+    }
     parent = &view;
 }
 
@@ -668,8 +756,10 @@ void PastelEditor::setPage(int page)
     currentPage = page;
     updateVisibility();
     fxPage.setVisible(page == 1);
+    modPage.setVisible(page == 2);
     mainTab.setToggleState(page == 0, juce::dontSendNotification);
     fxTab.setToggleState(page == 1, juce::dontSendNotification);
+    modTab.setToggleState(page == 2, juce::dontSendNotification);
 }
 
 void PastelEditor::showTab(int tab)
@@ -709,7 +799,7 @@ void PastelEditor::paintView(juce::Graphics& g)
 
     // OUT meter
     g.setFont(lnf.uiFont(10.0f));
-    g.drawText("OUT", meterArea.getX(), meterArea.getY(), 30, meterArea.getHeight(), juce::Justification::centredLeft);
+    g.drawText("OUT", meterArea.getX(), meterArea.getY(), 30, 26, juce::Justification::centredLeft);
     for (int ch = 0; ch < 2; ++ch)
     {
         juce::Rectangle<float> bar((float) meterArea.getX() + 30, (float) meterArea.getY() + 4 + ch * 13, 92, 8);
@@ -718,6 +808,16 @@ void PastelEditor::paintView(juce::Graphics& g)
         float v = juce::jlimit(0.0f, 1.0f, juce::Decibels::gainToDecibels(proc.getMeter(ch), -60.0f) / 60.0f + 1.0f);
         g.setColour(proc.getMeter(ch) > 0.98f ? PC::accentBright : PC::accent);
         if (v > 0.01f) g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * v), 3.0f);
+    }
+    // limiter gain reduction (lit while the limiter turns peaks down)
+    {
+        const float gr = proc.getLimiterReductionDb();
+        const bool on = proc.apvts.getRawParameterValue(PP::LIMIT)->load() > 0.5f;
+        g.setColour(on && gr > 0.05f ? PC::amber : PC::textDim);
+        g.setFont(lnf.uiFont(9.5f));
+        const juce::String t = !on ? juce::String("LIMIT OFF")
+                                   : "GR " + (gr > 0.05f ? "-" + juce::String(gr, 1) : juce::String("0.0")) + " dB";
+        g.drawText(t, meterArea.getX() + 30, meterArea.getY() + 26, 92, 11, juce::Justification::centredRight);
     }
 
     // sample info + engines description
@@ -751,16 +851,7 @@ void PastelEditor::refreshFileList()
 
 void PastelEditor::refreshPresetBox()
 {
-    presetBox.clear(juce::dontSendNotification);
-    presetBox.addItem("Init", 1);
-    juce::Array<juce::File> files = PastelProcessor::presetFolder().findChildFiles(juce::File::findFiles, false, "*.pastelsampler");
-    files.sort();
-    if (!files.isEmpty()) presetBox.addSeparator();
-    for (int i = 0; i < files.size(); ++i) presetBox.addItem(files[i].getFileNameWithoutExtension(), 100 + i);
-    presetBox.addSeparator();
-    presetBox.addItem("Save preset...", 2);
-    presetBox.addItem("Load preset file...", 3);
-    presetBox.setText(presetName, juce::dontSendNotification);
+    presetBtn.setButtonText(proc.getPresetName());
 }
 
 void PastelEditor::openRow(int row)
@@ -862,6 +953,15 @@ void PastelEditor::syncUi()
     const int voices = (int) proc.apvts.getRawParameterValue(PP::V_VOICES)->load();
     if (voicesBox.getSelectedId() != voices) voicesBox.setSelectedId(voices, juce::dontSendNotification);
 
+    undoBtn.setEnabled(proc.canUndo());
+    redoBtn.setEnabled(proc.canRedo());
+    undoBtn.setAlpha(proc.canUndo() ? 1.0f : 0.4f);
+    redoBtn.setAlpha(proc.canRedo() ? 1.0f : 0.4f);
+
+    const bool tempered = proc.apvts.getRawParameterValue(PP::V_TUNING)->load() < 0.5f;
+    tonicChoice->c.setEnabled(!tempered);
+    tonicChoice->c.setAlpha(tempered ? 0.45f : 1.0f);
+
     const bool over = proc.apvts.getRawParameterValue(PP::ROOTOVR)->load() > 0.5f;
     rootChoice->c.setEnabled(over);
     rootChoice->c.setAlpha(over ? 1.0f : 0.45f);
@@ -912,12 +1012,41 @@ void PastelEditor::syncUi()
     }
 }
 
+void PastelEditor::afterStateJump()
+{
+    for (int g = 0; g < PastelProcessor::RG_COUNT; ++g)
+        lockBtns[(size_t) g].setToggleState(proc.isGroupLocked(g), juce::dontSendNotification);
+    refreshPresetBox();
+    syncUi();
+    instrumentChanged();
+    partials.repaint();
+}
+
+bool PastelEditor::keyPressed(const juce::KeyPress& k)
+{
+    const auto m = k.getModifiers();
+    if (m.isCommandDown() && (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z'))
+    {
+        if (m.isShiftDown()) proc.redo(); else proc.undo();
+        afterStateJump();
+        return true;
+    }
+    if (m.isCommandDown() && (k.getKeyCode() == 'Y' || k.getKeyCode() == 'y'))
+    {
+        proc.redo();
+        afterStateJump();
+        return true;
+    }
+    return false;
+}
+
 void PastelEditor::timerCallback()
 {
     loadBar.setProgress(proc.getLoadProgress(), proc.isLoading());
     piano.updateActive();
     piano.refresh();
     view.repaint(meterArea);
+    if (currentPage == 2) for (auto& m : lfoMeters) m.repaint();
     preview.repaint();
     syncUi();
 

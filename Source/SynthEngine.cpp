@@ -6,7 +6,7 @@ constexpr float kTwoPi = juce::MathConstants<float>::twoPi;
 
 float dbToGain(float db) { return db <= -47.9f ? 0.0f : std::pow(10.0f, db / 20.0f); }
 
-// cents offset per pitch class (tonic C) relative to 12-TET
+// cents offset per scale degree (semitones above the tonic) relative to 12-TET
 const float kJust[12] { 0, 11.73f, 3.91f, 15.64f, -13.69f, -1.96f, -9.78f, 1.96f, 13.69f, -15.64f, 17.6f, -11.73f };
 const float kPyth[12] { 0, -9.78f, 3.91f, -5.87f, 7.82f, -1.96f, -11.73f, 1.96f, -7.82f, 5.87f, -3.91f, 9.78f };
 
@@ -48,16 +48,13 @@ struct SVF
 {
     float ic1 = 0, ic2 = 0;
     void reset() { ic1 = ic2 = 0; }
-    // satLimit > 0 soft-limits the band-pass state: high-Q peaks self-limit (like an analog
-    // filter's resonance) while ordinary levels stay linear
-    float process(float v0, float a1, float a2, float a3, float k, int type, float satLimit = 0.0f)
+    float process(float v0, float a1, float a2, float a3, float k, int type)
     {
         float v3 = v0 - ic2;
         float v1 = a1 * ic1 + a2 * v3;
         float v2 = ic2 + a2 * ic1 + a3 * v3;
         ic1 = 2.0f * v1 - ic1;
         ic2 = 2.0f * v2 - ic2;
-        if (satLimit > 0.0f) ic1 = satLimit * std::tanh(ic1 / satLimit);
         return type == 0 ? v2 : (type == 1 ? v0 - k * v1 - v2 : v1);
     }
 };
@@ -96,7 +93,7 @@ namespace Blend
 {
 float noteHz(const EngineParams& p, double note)
 {
-    int pc = ((int) std::lround(note) % 12 + 12) % 12;
+    int pc = (((int) std::lround(note) - p.tonic) % 12 + 12) % 12;
     float cents = p.tuning == 1 ? kJust[pc] : (p.tuning == 2 ? kPyth[pc] : 0.0f);
     return (float) (p.a4 * std::pow(2.0, (note - 69.0 + cents / 100.0) / 12.0));
 }
@@ -589,7 +586,8 @@ struct GranularPlayer
                     if (gr.on) continue;
                     const double jit = first ? 0.0 : (rnd() * 2.0f - 1.0f) * p.gJitter;
                     gr.inc = incBase * std::pow(2.0, jit / 1200.0);
-                    double pos = head + (first ? 0.0 : (rnd() * 2.0f - 1.0f) * spray);
+                    double pos = head + p.gPosMod * (double) juce::jmax(1, in.end - in.start)
+                               + (first ? 0.0 : (rnd() * 2.0f - 1.0f) * spray);
                     const double need = gr.inc * glen;
                     const double lo = in.start, hi = juce::jmax((double) in.start, in.end - need - 2.0);
                     pos = juce::jlimit(lo, hi, pos);
@@ -681,6 +679,8 @@ struct SynthEngine::Voice
     // attack timeline: 1 = follow the sampler (no stretch) during the attack, ramps to 0 after
     double tl = 0.0;
     bool stereoP = false;
+    const Instrument* src = nullptr; // the instrument this voice started on
+    float modRand = 0; // Random mod source: drawn per note, -1..1
 };
 
 // ---------------------------------------------------------------------------
@@ -689,9 +689,10 @@ SynthEngine::~SynthEngine() = default;
 
 static std::vector<float> s_windows[SynthEngine::kNumFft];
 
-void SynthEngine::prepare(double sampleRate, int)
+void SynthEngine::prepare(double sampleRate, int maxBlock)
 {
     sr = sampleRate;
+    for (auto& b : lfoBuf) b.assign((size_t) (juce::jmax(512, maxBlock) / kSub + 2), 0.0f);
     sincTable();
     for (int i = 0; i < kNumFft; ++i)
     {
@@ -711,6 +712,7 @@ void SynthEngine::prepare(double sampleRate, int)
         }
     }
     voices.clear();
+    for (auto& l : lingering) l.reset();
     for (int i = 0; i < kMaxVoices; ++i)
     {
         auto v = std::make_unique<Voice>();
@@ -723,11 +725,52 @@ void SynthEngine::prepare(double sampleRate, int)
     heldStack.reserve(128);
 }
 
-std::shared_ptr<const Instrument> SynthEngine::setInstrument(std::shared_ptr<const Instrument> i)
+std::shared_ptr<const Instrument> SynthEngine::setInstrument(std::shared_ptr<const Instrument> i, bool keepVoices)
 {
-    allNotesOff(true);
-    std::swap(inst, i);
-    return i;
+    if (!keepVoices || inst == nullptr)
+    {
+        allNotesOff(true);
+        std::swap(inst, i);
+        return i;
+    }
+    // sounding voices keep playing the instrument they started on; it lingers until they end
+    std::shared_ptr<const Instrument> out;
+    if (usedByVoice(inst.get()))
+    {
+        std::shared_ptr<const Instrument>* slot = nullptr;
+        for (auto& l : lingering) if (l == nullptr) { slot = &l; break; }
+        if (slot == nullptr)
+        {
+            // no room: the oldest lingering instrument's voices stop
+            slot = &lingering[(size_t) lingerNext];
+            lingerNext = (lingerNext + 1) % (int) lingering.size();
+            for (auto& v : voices)
+                if (v->src == slot->get()) { v->active = false; v->env.reset(); }
+            out = std::move(*slot);
+        }
+        *slot = std::move(inst);
+    }
+    else out = std::move(inst);
+    inst = std::move(i);
+    return out;
+}
+
+bool SynthEngine::usedByVoice(const Instrument* in) const
+{
+    for (auto& v : voices) if (v->active && v->src == in) return true;
+    return false;
+}
+
+std::shared_ptr<const Instrument> SynthEngine::takeRetired()
+{
+    for (auto& l : lingering)
+        if (l != nullptr && !usedByVoice(l.get())) return std::move(l);
+    return nullptr;
+}
+
+float SynthEngine::rootHzOf(const Instrument& in)
+{
+    return Analysis::midiToHz(in.pitch.f0 > 0 ? in.pitch.midi : 60.0f);
 }
 
 int SynthEngine::numActiveVoices() const
@@ -771,6 +814,7 @@ void SynthEngine::startVoice(Voice& v, int note, float vel, const EngineParams& 
         v.detune += side * p.spread * 8.0f * rng.nextFloat();
     }
 
+    v.modRand = rng.nextFloat() * 2.0f - 1.0f;
     v.env.setParameters(envParams(p));
     v.env.reset();
     v.env.noteOn();
@@ -779,6 +823,7 @@ void SynthEngine::startVoice(Voice& v, int note, float vel, const EngineParams& 
     // the voice keeps the engine it started with, so switching engines lets ringing notes finish
     v.runS = v.runA = v.runP = v.runG = false;
     v.blendMode = p.engine == 4;
+    v.src = inst.get();
     if (inst == nullptr) return;
     const double region = (p.loopMode != 0 ? inst->loopStart : inst->end) - inst->start;
     double startSample = inst->start + juce::jmax(0.0, region) * p.start * 0.999 + startJitter * inst->sr;
@@ -793,9 +838,6 @@ void SynthEngine::startVoice(Voice& v, int note, float vel, const EngineParams& 
     if (wp > 0 && inst->spectral)
     {
         int idx = juce::jlimit(0, kNumFft - 1, (int) std::lround(std::log2((double) inst->spectral->N)) - 10);
-        // initial analysis advance per synthesis hop (time stretch before resampling)
-        const double r0 = Blend::noteHz(p, v.pitch + bend * p.bendRange + v.detune / 100.0) / juce::jmax(1.0f, p.rootHz);
-        juce::ignoreUnused(r0);
         const double adv0 = 1.0 - p.freeze; // attack follows the sampler timeline (see handoff)
         v.pp.start(*inst->spectral, startSample, ffts[(size_t) idx].get(), fftInvScale[(size_t) idx], s_windows[idx].data(), adv0);
         v.stereoP = inst->spectralR != nullptr && inst->spectralR != inst->spectral;
@@ -932,45 +974,136 @@ void SynthEngine::publishActive()
     activeHi.store(hi);
 }
 
+// one value per kSub block of this render call (shapes as the DSPEngine filter LFO)
+void SynthEngine::advanceLfos(int num, const EngineParams& p)
+{
+    const int blocks = (num + kSub - 1) / kSub;
+    for (int k = 0; k < 2; ++k)
+    {
+        auto& buf = lfoBuf[k];
+        if ((int) buf.size() < blocks) continue; // prepare() sizes it for the host block
+        const double inc = (double) p.lfoHz[k] / sr;
+        for (int b = 0; b < blocks; ++b)
+        {
+            const double ph = lfoPhase[k];
+            float v = 0.0f;
+            switch (p.lfoWave[k])
+            {
+                case 0: v = std::sin((float) (kTwoPi * ph)); break;
+                case 1: v = ph < 0.5 ? (float) (4.0 * ph - 1.0) : (float) (3.0 - 4.0 * ph); break;
+                case 2: v = (float) (2.0 * ph - 1.0); break;
+                case 3: v = ph < 0.5 ? 1.0f : -1.0f; break;
+                default: v = lfoHold[k]; break;
+            }
+            buf[(size_t) b] = v;
+            const int n = juce::jmin(kSub, num - b * kSub);
+            lfoPhase[k] += inc * n;
+            if (lfoPhase[k] >= 1.0)
+            {
+                lfoPhase[k] -= std::floor(lfoPhase[k]);
+                lfoHold[k] = rng.nextFloat() * 2.0f - 1.0f; // S&H: a new step every cycle
+            }
+        }
+        if (blocks > 0) lfoViz[(size_t) k].store(buf[0]);
+    }
+}
+
 void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, const EngineParams& p)
 {
+    if (num > 0) advanceLfos(num, p);
     if (inst == nullptr) { publishActive(); return; }
+    // matrix: which destinations are routed (the param-copy path only runs when needed)
+    bool anyRoute = false, copyDst = false, panRouted = false;
+    for (auto& r : p.routes)
+        if (r.src != MS_NONE && r.dst != MD_NONE && r.amt != 0.0f)
+        {
+            anyRoute = true;
+            if (r.dst >= MD_GPOS) copyDst = true;
+            if (r.dst == MD_PAN) panRouted = true;
+        }
+    EngineParams q;
+    if (copyDst) q = p;
     float* outL = out.getWritePointer(0, start);
     float* outR = out.getWritePointer(juce::jmin(1, out.getNumChannels() - 1), start);
     const float curveExp = std::pow(2.0f, (p.curve - 0.5f) * 3.0f);
     const auto envP = envParams(p);
-    const double srcPerOut = inst->sr / sr;
     uint64_t newestGranular = 0;
     Voice* vizVoice = nullptr;
 
     for (auto& vp : voices)
     {
         Voice& v = *vp;
-        if (!v.active) continue;
+        if (!v.active || v.src == nullptr) continue;
+        // a voice plays the instrument it started on (a rebuild may have swapped in a new one)
+        const Instrument& in = *v.src;
+        const double srcPerOut = in.sr / sr;
+        const float rootHz = (v.src == inst.get() || p.rootOverride) ? p.rootHz : rootHzOf(in);
         v.env.setParameters(envP);
         const float velGain = v.vel * v.vel;
         const float panA = (v.pan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
-        const float gL = std::cos(panA) * juce::MathConstants<float>::sqrt2;
-        const float gR = std::sin(panA) * juce::MathConstants<float>::sqrt2;
+        float gL = std::cos(panA) * juce::MathConstants<float>::sqrt2;
+        float gR = std::sin(panA) * juce::MathConstants<float>::sqrt2;
 
         for (int off = 0; off < num && v.active; off += kSub)
         {
             const int n = juce::jmin(kSub, num - off);
+            // mod matrix for this voice + kSub block
+            float md[MD_COUNT] {};
+            const EngineParams* pv = &p;
+            if (anyRoute)
+            {
+                const int bi = juce::jmin(off / kSub, (int) lfoBuf[0].size() - 1);
+                for (auto& r : p.routes)
+                {
+                    if (r.src == MS_NONE || r.dst <= MD_NONE || r.dst >= MD_COUNT || r.amt == 0.0f) continue;
+                    float sv = 0.0f;
+                    switch (r.src)
+                    {
+                        case MS_LFO1: sv = lfoBuf[0][(size_t) bi]; break;
+                        case MS_LFO2: sv = lfoBuf[1][(size_t) bi]; break;
+                        case MS_WHEEL: sv = modWheel; break;
+                        case MS_AT: sv = aftertouch; break;
+                        case MS_VEL: sv = v.vel; break;
+                        case MS_KEY: sv = juce::jlimit(-1.0f, 1.0f, (float) (v.note - 60) / 48.0f); break;
+                        case MS_RAND: sv = v.modRand; break;
+                        default: break;
+                    }
+                    md[r.dst] += sv * r.amt;
+                }
+                if (panRouted)
+                {
+                    const float pa = (juce::jlimit(-1.0f, 1.0f, v.pan + md[MD_PAN]) + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+                    gL = std::cos(pa) * juce::MathConstants<float>::sqrt2;
+                    gR = std::sin(pa) * juce::MathConstants<float>::sqrt2;
+                }
+                if (copyDst)
+                {
+                    q.gPosMod = p.gPosMod + md[MD_GPOS];
+                    q.gSizeMs = juce::jlimit(5.0f, 1000.0f, p.gSizeMs * std::pow(4.0f, md[MD_GSIZE]));
+                    q.gDensity = juce::jlimit(0.5f, 400.0f, p.gDensity * std::pow(4.0f, md[MD_GDENS]));
+                    q.gSprayMs = juce::jlimit(0.0f, 2000.0f, p.gSprayMs + 200.0f * md[MD_GSPRAY]);
+                    q.shift = juce::jlimit(-24.0f, 24.0f, p.shift + 12.0f * md[MD_SHIFT]);
+                    q.blur = juce::jlimit(0.0f, 1.0f, p.blur + md[MD_BLUR]);
+                    q.freeze = juce::jlimit(0.0f, 1.0f, p.freeze + md[MD_FREEZE]);
+                    q.tilt = juce::jlimit(-24.0f, 24.0f, p.tilt + 12.0f * md[MD_TILT]);
+                    pv = &q;
+                }
+            }
             if (v.pitch != v.target)
             {
                 double step = v.glideStep * n;
                 if (step <= 0 || std::abs(v.target - v.pitch) <= step) v.pitch = v.target;
                 else v.pitch += v.target > v.pitch ? step : -step;
             }
-            const double pn = v.pitch + bend * p.bendRange + v.detune / 100.0;
+            const double pn = v.pitch + bend * p.bendRange + v.detune / 100.0 + 12.0 * md[MD_PITCH];
             const float hz = Blend::noteHz(p, pn);
-            const double ratio = hz / juce::jmax(1.0f, p.rootHz);
+            const double ratio = hz / juce::jmax(1.0f, rootHz);
             // a voice keeps the mode it started in: blend voices follow the mixer, single-engine
             // voices play at unity (switching modes never changes the level of ringing notes)
             const float ws = v.runS ? (v.blendMode ? dbToGain(p.sLevel) : 1.0f) : 0.0f;
             const float wa = v.runA ? (v.blendMode ? dbToGain(p.aLevel) : 1.0f) : 0.0f;
             const float wp = v.runP ? (v.blendMode ? dbToGain(p.pLevel) : 1.0f) : 0.0f;
-            const bool loopNow = loopActive(p.loopMode, v.held) && inst->loopEnd - inst->loopStart > 16;
+            const bool loopNow = loopActive(p.loopMode, v.held) && in.loopEnd - in.loopStart > 16;
             // keep length: 1 (stretch) ... but during the attack follow the sampler (ratio)
             const double timeRate = p.keepLen ? 1.0 + (ratio - 1.0) * v.tl : ratio;
 
@@ -978,14 +1111,14 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
             if (v.runS)
             {
                 double inc = ratio * std::pow(2.0, p.sTune / 1200.0) * srcPerOut;
-                v.sp.render(*inst, tL, tR, n, inc, p.interp, p.loopMode, v.held);
+                v.sp.render(in, tL, tR, n, inc, p.interp, p.loopMode, v.held);
                 for (int i = 0; i < n; ++i) { L[i] += ws * tL[i]; R[i] += ws * tR[i]; }
             }
             if (v.runG)
             {
                 const float wg = v.blendMode ? dbToGain(p.gLevel) : 1.0f;
                 float gL[kSub], gR[kSub];
-                v.gp.render(*inst, gL, gR, n, ratio * srcPerOut, srcPerOut, sr, p, loopNow);
+                v.gp.render(in, gL, gR, n, ratio * srcPerOut, srcPerOut, sr, *pv, loopNow);
                 for (int i = 0; i < n; ++i) { L[i] += wg * gL[i]; R[i] += wg * gR[i]; }
                 if (v.age >= newestGranular) { newestGranular = v.age; vizVoice = &v; }
             }
@@ -993,34 +1126,34 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
             float ADL[kSub] {}, ADR[kSub] {}; // additive layer (sampler-attack handoff applies here)
             if (v.runA)
             {
-                const auto& ad = *inst->additive;
-                v.ap.render(ad, M, n, ratio, sr, timeRate * srcPerOut / ad.hop, p, loopNow,
-                            (double) inst->loopStart / ad.hop, (double) inst->loopEnd / ad.hop);
+                const auto& ad = *in.additive;
+                v.ap.render(ad, M, n, ratio, sr, timeRate * srcPerOut / ad.hop, *pv, loopNow,
+                            (double) in.loopStart / ad.hop, (double) in.loopEnd / ad.hop);
                 for (int i = 0; i < n; ++i) { ADL[i] = wa * M[i]; ADR[i] = wa * M[i]; }
             }
             if (v.runP)
             {
-                const auto& sd = *inst->spectral;
+                const auto& sd = *in.spectral;
                 SpectralCtx c;
                 c.ratio = ratio;
                 c.srcPerOut = srcPerOut;
                 // Freeze slows the analysis read-out down to a standstill, but only after the
                 // attack (tl fades out), so a frozen note holds its tone rather than the onset
-                c.timeRate = timeRate * (1.0 - p.freeze * (1.0 - v.tl));
-                c.shiftRatio = std::pow(2.0f, p.shift / 12.0f);
+                c.timeRate = timeRate * (1.0 - pv->freeze * (1.0 - v.tl));
+                c.shiftRatio = std::pow(2.0f, pv->shift / 12.0f);
                 // Smear: one-pole smoothing of the spectrum with a time constant of 0..2 s,
                 // independent of the FFT size (frames per second differ per sample / quality)
                 {
-                    const double tau = 2.0 * (double) p.blur * p.blur;
+                    const double tau = 2.0 * (double) pv->blur * pv->blur;
                     c.blur = tau > 1.0e-4 ? (float) std::exp(-((double) sd.hop / sd.sr) / tau) : 0.0f;
                 }
                 c.formant = p.formant;
                 c.loopNow = loopNow;
-                c.lsF = (double) inst->loopStart / sd.hop;
-                c.leF = (double) inst->loopEnd / sd.hop;
+                c.lsF = (double) in.loopStart / sd.hop;
+                c.leF = (double) in.loopEnd / sd.hop;
                 float MR[kSub];
                 v.pp.render(sd, M, n, c);
-                if (v.stereoP) v.ppR.render(*inst->spectralR, MR, n, c);
+                if (v.stereoP) v.ppR.render(*in.spectralR, MR, n, c);
                 else std::copy(M, M + n, MR);
                 for (int i = 0; i < n; ++i) { RL[i] += wp * M[i]; RR[i] += wp * MR[i]; }
             }
@@ -1029,7 +1162,7 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
                 if (v.attOn)
                 {
                     float aL[kSub], aR[kSub];
-                    v.att.render(*inst, aL, aR, n, ratio * srcPerOut, p.interp, 0, true);
+                    v.att.render(in, aL, aR, n, ratio * srcPerOut, p.interp, 0, true);
                     const float gA = v.runA ? wa : 0.0f, gP = v.runP ? wp : 0.0f;
                     for (int i = 0; i < n; ++i)
                     {
@@ -1053,17 +1186,16 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
 
             if (p.fOn)
             {
-                float fc = p.cutoff * std::pow(2.0f, p.keytrack * (float) (v.pitch - 60.0) / 12.0f);
+                float fc = p.cutoff * std::pow(2.0f, p.keytrack * (float) (v.pitch - 60.0) / 12.0f + 5.0f * md[MD_CUTOFF]);
                 fc = juce::jlimit(20.0f, (float) (sr * 0.45), fc);
                 const float g = juce::jmin(8.0f, std::tan(juce::MathConstants<float>::pi * fc / (float) sr));
                 // Resonance: Q = 0.5 .. 25, linear so the peak stays sharp (knob centre = Q 6.6).
                 // Only the last stage resonates in 24 dB mode (the first is Butterworth). Level is
                 // held by a Q-scaled make-down plus a soft limiter that only acts above unity.
-                const float r = juce::jlimit(0.0f, 1.0f, p.reso);
+                const float r = juce::jlimit(0.0f, 1.0f, p.reso + md[MD_RESO]);
                 const float Q = 0.5f + r * r * 24.5f;
                 const float kRes = 1.0f / Q, kFlat = 1.41421356f;
                 const float qComp = Q > 0.7071f ? std::pow(Q / 0.7071f, -0.4f) : 1.0f;
-                const float satLimit = 0.0f; // linear
                 auto coeffs = [g](float k, float& a1, float& a2, float& a3)
                 {
                     a1 = 1.0f / (1.0f + g * (g + k)); a2 = g * a1; a3 = g * a2;
@@ -1091,8 +1223,8 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
                         xl = v.filt[0][0].process(xl, f1, f2, f3, kFlat, p.ftype);
                         xr = v.filt[1][0].process(xr, f1, f2, f3, kFlat, p.ftype);
                     }
-                    xl = v.filt[0][1].process(xl, r1, r2, r3, kRes, p.ftype, satLimit);
-                    xr = v.filt[1][1].process(xr, r1, r2, r3, kRes, p.ftype, satLimit);
+                    xl = v.filt[0][1].process(xl, r1, r2, r3, kRes, p.ftype);
+                    xr = v.filt[1][1].process(xr, r1, r2, r3, kRes, p.ftype);
                     xl = softLimit(xl * qComp);
                     xr = softLimit(xr * qComp);
                     L[i] = xl; R[i] = xr;
@@ -1103,7 +1235,7 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
             {
                 float e = v.env.getNextSample();
                 if (curveExp != 1.0f && e > 0.0f) e = std::pow(e, curveExp);
-                const float g = e * velGain * v.gain;
+                const float g = e * velGain * v.gain * juce::jlimit(0.0f, 2.0f, 1.0f + md[MD_LEVEL]);
                 outL[off + i] += L[i] * g * gL;
                 outR[off + i] += R[i] * g * gR;
             }
@@ -1117,7 +1249,7 @@ void SynthEngine::render(juce::AudioBuffer<float>& out, int start, int num, cons
     if (vizVoice != nullptr && vizVoice->active)
     {
         float tmp[64];
-        const int c = vizVoice->gp.activePositions(tmp, 64, (double) juce::jmax(1, inst->raw.getNumSamples()));
+        const int c = vizVoice->gp.activePositions(tmp, 64, (double) juce::jmax(1, vizVoice->src->raw.getNumSamples()));
         for (int i = 0; i < c; ++i) grainViz[(size_t) i].store(tmp[i]);
         grainVizCount.store(c);
     }
