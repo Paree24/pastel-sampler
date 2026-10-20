@@ -85,7 +85,8 @@ PastelEditor::Switch& PastelEditor::headerSwitch(const juce::String& id, juce::R
 {
     auto s = std::make_unique<Switch>();
     s->a = std::make_unique<APVTS::ButtonAttachment>(proc.apvts, id, s->b);
-    s->b.setBounds(c.getRight() - 52, c.getY() + 3, 46, 20);
+    s->b.setBounds(c.getRight() - 30, c.getY() + 2, 24, 22);
+    s->b.getProperties().set("power", true);   // v3: section on/off is the power glyph
     if (auto* prm = proc.apvts.getParameter(id)) s->b.setTooltip(prm->getName(64));
     parent->addAndMakeVisible(s->b);
     switches.push_back(std::move(s));
@@ -95,6 +96,7 @@ PastelEditor::Switch& PastelEditor::headerSwitch(const juce::String& id, juce::R
 PastelEditor::Switch& PastelEditor::captionSwitch(const juce::String& id, const juce::String& caption, int cx, int y)
 {
     auto& s = headerSwitch(id, {});
+    s.b.getProperties().remove("power");   // a captioned pill, not a section switch
     s.b.setBounds(cx - 23, y, 46, 20);
     s.cap.setText(caption, juce::dontSendNotification);
     s.cap.setFont(lnf.uiFont(9.5f));
@@ -462,9 +464,14 @@ PastelEditor::PastelEditor(PastelProcessor& p)
         juce::Rectangle<int> c(976, 296, 414, 114);
         card("Envelope", c);
         headerSwitch(PP::E_ON, c);
+        // v3: the envelope you drag on the left, its knobs in a compact block on the right
+        auto* ev = addView<pastel::EnvView>({ 988, 324, 200, 80 }, proc.apvts,
+                                            juce::StringArray { PP::E_A, PP::E_D, PP::E_S, PP::E_R }, juce::String());
+        ev->setShowValues(false);
+        ev->setTooltip("Drag the points: attack, decay / sustain, release (double-click = defaults)");
         const juce::String ids[] { PP::E_A, PP::E_D, PP::E_S, PP::E_R, PP::E_CURVE };
         const char* names[] { "Attack", "Decay", "Sustain", "Release", "Curve" };
-        for (int i = 0; i < 5; ++i) knob(ids[i], names[i], (int) (976 + 414.0f / 5 * (i + 0.5f)), 326, 46);
+        for (int i = 0; i < 5; ++i) knob(ids[i], names[i], 1222 + (i % 3) * 58, i < 3 ? 322 : 366, 26);
     }
     {
         juce::Rectangle<int> c(976, 418, 414, 170);
@@ -472,7 +479,12 @@ PastelEditor::PastelEditor(PastelProcessor& p)
         headerSwitch(PP::F_ON, c);
         const juce::String ids[] { PP::F_CUT, PP::F_RES, PP::F_DRIVE, PP::F_KEY };
         const char* names[] { "Cutoff", "Reso", "Drive", "Key track" };
-        for (int i = 0; i < 4; ++i) knob(ids[i], names[i], (int) (976 + 414.0f / 4 * (i + 0.5f)), 450, 50);
+        // v3: the response you drag on the left, its knobs in a 2 x 2 block on the right
+        addView<pastel::FilterView>({ 988, 446, 220, 82 }, proc.apvts, PP::F_CUT, PP::F_RES, PP::F_TYPE, juce::String(), juce::String(),
+                                    std::vector<pastel::FilterView::Mode> { pastel::FilterView::Mode::lp12, pastel::FilterView::Mode::hp12,
+                                                                            pastel::FilterView::Mode::bp12 })
+            ->setTooltip("Drag: cutoff sideways, resonance up / down");
+        for (int i = 0; i < 4; ++i) knob(ids[i], names[i], 1252 + (i % 2) * 76, i < 2 ? 444 : 490, 28);
         choice(PP::F_TYPE, "Type", PP::filterTypeChoices, { 990, 542, 186, 24 });
         choice(PP::F_SLOPE, "Slope", PP::slopeChoices, { 1190, 542, 186, 24 });
     }
@@ -600,42 +612,70 @@ void PastelEditor::buildEffectsPage()
         choice(id, "Mode", items, { x, c.getBottom() - 36, w, 24 });
     };
 
+    // v3: each card = the picture you drag, a mode switch (if any), one row of knobs along the bottom
+    using FS = pastel::FxView::Style;
+    auto picture = [&](juce::Rectangle<int> c, bool withSeg)
+    {
+        return juce::Rectangle<int>(c.getX() + 10, c.getY() + 30, c.getWidth() - 20, c.getHeight() - 30 - 84 - (withSeg ? 28 : 0));
+    };
+    auto segAt = [&](juce::Rectangle<int> c) { return juce::Rectangle<int>(c.getX() + 10, c.getBottom() - 84 - 26, c.getWidth() - 20, 22); };
+    auto knobRow = [&](juce::Rectangle<int> c, std::initializer_list<std::pair<juce::String, const char*>> ks)
+    {
+        row(c, ks, c.getBottom() - 78, (int) ks.size() > 3 ? 34 : 38);
+    };
+
     auto c = cell(0);
     card("Chorus", c); headerSwitch(PP::CHON, c);
-    row(c, { { PP::CHRATE, "Rate" }, { PP::CHDEPTH, "Depth" }, { PP::CHMIX, "Mix" } }, c.getY() + 48, 58);
-    bottomCombo(PP::CHMODE, PP::chorusModes, c, c.getX() + 10, c.getWidth() - 20);
+    addView<pastel::FxView>(picture(c, true), proc.apvts, FS::chorus, PP::CHRATE, PP::CHDEPTH, PP::CHON)
+        ->setTooltip("Drag: rate sideways, depth up / down");
+    addView<pastel::SegChoice>(segAt(c), proc.apvts, PP::CHMODE, juce::StringArray { "MANUAL", "I", "II", "WIDE" });
+    knobRow(c, { { PP::CHRATE, "Rate" }, { PP::CHDEPTH, "Depth" }, { PP::CHMIX, "Mix" } });
 
     c = cell(1);
     card("Phaser", c); headerSwitch(PP::PHON, c);
-    row(c, { { PP::PHRATE, "Rate" }, { PP::PHDEPTH, "Depth" } }, c.getY() + 40, 58);
-    row(c, { { PP::PHFB, "Fdbk" }, { PP::PHMIX, "Mix" } }, c.getY() + 132, 58);
+    addView<pastel::FxView>(picture(c, false), proc.apvts, FS::phaser, PP::PHRATE, PP::PHDEPTH, PP::PHON)
+        ->setTooltip("Drag: rate sideways, depth up / down");
+    knobRow(c, { { PP::PHRATE, "Rate" }, { PP::PHDEPTH, "Depth" }, { PP::PHFB, "Fdbk" }, { PP::PHMIX, "Mix" } });
 
     c = cell(2);
     card("Flanger", c); headerSwitch(PP::FLON, c);
-    row(c, { { PP::FLRATE, "Rate" }, { PP::FLDEPTH, "Depth" } }, c.getY() + 40, 58);
-    row(c, { { PP::FLFB, "Fdbk" }, { PP::FLMIX, "Mix" } }, c.getY() + 132, 58);
+    addView<pastel::FxView>(picture(c, false), proc.apvts, FS::chorus, PP::FLRATE, PP::FLDEPTH, PP::FLON)
+        ->setTooltip("Drag: rate sideways, depth up / down");
+    knobRow(c, { { PP::FLRATE, "Rate" }, { PP::FLDEPTH, "Depth" }, { PP::FLFB, "Fdbk" }, { PP::FLMIX, "Mix" } });
 
     c = cell(3);
     card("Distortion", c); headerSwitch(PP::DION, c);
-    row(c, { { PP::DIDRIVE, "Drive" }, { PP::DIMIX, "Mix" } }, c.getY() + 70, 64);
+    driveViews[0] = addView<pastel::DriveView>(picture(c, false), proc.apvts, PP::DIDRIVE);
+    driveViews[0]->setTooltip("Drag up / down: drive");
+    knobRow(c, { { PP::DIDRIVE, "Drive" }, { PP::DIMIX, "Mix" } });
 
     c = cell(4);
     card("Saturation", c); headerSwitch(PP::SAON, c);
-    row(c, { { PP::SAAMT, "Amount" }, { PP::SATONE, "Tone" } }, c.getY() + 48, 58);
-    bottomCombo(PP::SAMODE, PP::satModes, c, c.getX() + 10, c.getWidth() - 20);
+    driveViews[1] = addView<pastel::DriveView>(picture(c, true), proc.apvts, PP::SAAMT, PP::SAMODE);
+    driveViews[1]->setTooltip("Drag up / down: amount");
+    addView<pastel::SegChoice>(segAt(c), proc.apvts, PP::SAMODE, juce::StringArray { "TAPE", "TUBE" });
+    knobRow(c, { { PP::SAAMT, "Amount" }, { PP::SATONE, "Tone" } });
 
     c = cell(5);
     card("Reverb", c); headerSwitch(PP::RVON, c);
-    row(c, { { PP::RVSIZE, "Size" }, { PP::RVDAMP, "Damp" }, { PP::RVMIX, "Mix" } }, c.getY() + 70, 58);
+    addView<pastel::FxView>(picture(c, false), proc.apvts, FS::reverb, PP::RVSIZE, PP::RVDAMP, PP::RVON,
+                            juce::String(), juce::String(), "SIZE", "DAMP")
+        ->setTooltip("Drag: size sideways, damping up / down");
+    knobRow(c, { { PP::RVSIZE, "Size" }, { PP::RVDAMP, "Damp" }, { PP::RVMIX, "Mix" } });
 
     c = cell(6);
     card("Delay", c); headerSwitch(PP::DLON, c);
-    row(c, { { PP::DLTIME, "Time" }, { PP::DLFB, "Fdbk" }, { PP::DLMIX, "Mix" } }, c.getY() + 48, 58);
-    captionSwitch(PP::DLSYNC, "SYNC", c.getX() + 34, c.getBottom() - 36);
-    choice(PP::DLDIV, "Div", PP::delayDivs, { c.getX() + 66, c.getBottom() - 36, c.getWidth() - 76, 24 });
+    addView<pastel::FxView>(picture(c, true), proc.apvts, FS::delay, PP::DLTIME, PP::DLFB, PP::DLON, PP::DLSYNC, PP::DLDIV)
+        ->setTooltip("Drag: time sideways (when not synced), feedback up / down");
+    {
+        const auto sr = segAt(c);
+        captionSwitch(PP::DLSYNC, "SYNC", sr.getX() + 24, sr.getY() - 2);
+        choice(PP::DLDIV, "", PP::delayDivs, { sr.getX() + 56, sr.getY() - 1, sr.getWidth() - 56, 24 });
+    }
+    knobRow(c, { { PP::DLTIME, "Time" }, { PP::DLFB, "Fdbk" }, { PP::DLMIX, "Mix" } });
 
     c = cell(7);
-    card("Master", c);
+    card("Output", c);
     knob(PP::VOLUME, "Volume", c.getCentreX(), c.getY() + 48, 72);
     captionSwitch(PP::LIMIT, "LIMITER", c.getCentreX() - 40, c.getBottom() - 44).b.setTooltip("Master peak limiter: -0.3 dBFS ceiling, 1.5 ms lookahead");
     captionSwitch(PP::V_MONO, "MONO", c.getCentreX() + 40, c.getBottom() - 44);
@@ -658,6 +698,9 @@ void PastelEditor::buildModPage()
         card("LFO " + juce::String(k + 1), c);
         knob(PP::L_RATE[k], "Rate", c.getX() + 60, c.getY() + 44, 64);
         choice(PP::L_WAVE[k], "Wave", PP::lfoWaves, { c.getX() + 126, c.getY() + 60, 128, 24 });
+        addView<pastel::LfoView>({ c.getX() + 14, c.getY() + 130, c.getWidth() - 28, 54 }, proc.apvts, PP::L_WAVE[k], juce::String(),
+                                 std::vector<pastel::Wave> { pastel::Wave::sine, pastel::Wave::tri, pastel::Wave::saw,
+                                                             pastel::Wave::square, pastel::Wave::snh });
         captionSwitch(PP::L_SYNC[k], "SYNC", c.getX() + 40, c.getBottom() - 44);
         choice(PP::L_DIV[k], "Division", PP::lfoDivs, { c.getX() + 84, c.getBottom() - 44, c.getWidth() - 98, 24 });
     }
@@ -792,10 +835,18 @@ void PastelEditor::paintView(juce::Graphics& g)
     g.drawRoundedRectangle(10.5f, 8.5f, kW - 21, 57, 6.0f, 1.0f);
     g.setColour(PC::text);
     g.setFont(lnf.logoFont(21.0f));
-    g.drawText("PASTEL SAMPLER", 24, 16, 300, 26, juce::Justification::centredLeft);
+    g.drawText("PASTEL SAMPLER", 50, 16, 300, 26, juce::Justification::centredLeft);
+    {   // the Pastel family mark: four rounded squares
+        const juce::uint32 cols[4] = { 0xffe88a8a, 0xff8fd0c2, 0xffe9a3b8, 0xffa9d58e };
+        for (int i = 0; i < 4; ++i)
+        {
+            g.setColour(juce::Colour(cols[i]));
+            g.fillRoundedRectangle(24.0f + (float) (i % 2) * 10.0f, 19.0f + (float) (i / 2) * 10.0f, 8.0f, 8.0f, 2.0f);
+        }
+    }
     g.setColour(PC::textDim);
     g.setFont(lnf.uiFont(12.0f));
-    g.drawFittedText(proc.getStatus(), 24, 43, 480, 16, juce::Justification::centredLeft, 1, 0.8f);
+    g.drawFittedText(proc.getStatus(), 50, 43, 454, 16, juce::Justification::centredLeft, 1, 0.8f);
 
     // OUT meter
     g.setFont(lnf.uiFont(10.0f));
@@ -1043,6 +1094,14 @@ bool PastelEditor::keyPressed(const juce::KeyPress& k)
 void PastelEditor::timerCallback()
 {
     loadBar.setProgress(proc.getLoadProgress(), proc.isLoading());
+    // the drive curves dim with their effect's power (the FX pads show BYPASSED themselves)
+    const juce::String drivePower[2] { PP::DION, PP::SAON };
+    for (int i = 0; i < 2; ++i)
+        if (auto* raw = proc.apvts.getRawParameterValue(drivePower[i]); raw != nullptr && driveViews[i] != nullptr)
+        {
+            const float a = raw->load() > 0.5f ? 1.0f : 0.4f;
+            if (driveViews[i]->getAlpha() != a) driveViews[i]->setAlpha(a);
+        }
     piano.updateActive();
     piano.refresh();
     view.repaint(meterArea);

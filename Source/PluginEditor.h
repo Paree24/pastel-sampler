@@ -6,6 +6,7 @@
 #include "PianoStrip.h"
 #include "Widgets.h"
 #include "PresetBrowser.h"
+#include "PastelViews.h"
 
 // Browser list: folders first, then audio files with a format tag and detected root.
 class FileListModel : public juce::ListBoxModel
@@ -94,6 +95,17 @@ private:
     std::vector<std::unique_ptr<Choice>> choices;
     std::vector<std::unique_ptr<juce::GroupComponent>> cards;
     std::vector<std::unique_ptr<juce::Label>> labels;
+    std::vector<std::unique_ptr<juce::Component>> views;   // v3 direct-manipulation views (PastelViews)
+    pastel::DriveView* driveViews[2] {};                     // distortion / saturation: dimmed while off
+    template <typename V, typename... Args>
+    V* addView(juce::Rectangle<int> bounds, Args&&... args)
+    {
+        auto* v = new V(std::forward<Args>(args)...);
+        views.emplace_back(v);
+        parent->addAndMakeVisible(v);
+        v->setBounds(bounds);
+        return v;
+    }
 
     // header
     juce::TextButton loadBtn { "LOAD" }, prevBtn { "<" }, nextBtn { ">" }, panicBtn { "PANIC" };

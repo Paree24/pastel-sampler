@@ -38,6 +38,7 @@ set(PASTEL_SOURCES
   Source/FileLibrary.cpp
   Source/PluginProcessor.cpp
   Source/PluginEditor.cpp
+  Source/PastelViews.cpp
   Source/PastelLookAndFeel.cpp
   Source/Widgets.cpp
   Source/PresetBrowser.cpp
