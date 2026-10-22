@@ -5,8 +5,9 @@
 #include <limits>
 
 // MIDI arpeggiator ahead of the engine: rewrites a block's MIDI so held keys become a
-// pattern of notes on their exact samples. While the host transport runs, steps sit on its
-// beat grid; otherwise the arp free-runs from the first key. Swing delays odd steps by up
+// pattern of notes on their exact samples. While the host transport runs, steps are counted in
+// host beats from the phrase's first key (so they follow the host tempo, and dotted rates start
+// where the phrase does); otherwise the arp free-runs from the first key. Swing delays odd steps by up
 // to half a step; latch keeps a chord playing after the keys go up; played velocity uses
 // each key's velocity. Fixed storage: process() never allocates once prepare() ran.
 // (Same timing model as the Pastel Soundfont Player arp.)
@@ -45,7 +46,9 @@ public:
         std::fill(std::begin(keyDown), std::end(keyDown), false);
         untilNext = 0.0;
         gridIdx = 0;
-        lastGridIdx = std::numeric_limits<long long>::min();
+        lastFiredBeat = -std::numeric_limits<double>::infinity();
+        anchor = 0.0;
+        phraseStart = false;
         step = 0;
         lastNote = -1;
     }
@@ -79,7 +82,7 @@ public:
         const double stepBeats = juce::jmax(1.0 / 64.0, s.stepBeats);
         const double swing = juce::jlimit(0.0f, 1.0f, s.swing);
         const bool grid = h.playing && h.hasPpq;
-        auto stepBeat = [&](long long k) { return ((double) k + ((k & 1) ? 0.5 * swing : 0.0)) * stepBeats; };
+        auto stepBeat = [&](long long k) { return anchor + ((double) k + ((k & 1) ? 0.5 * swing : 0.0)) * stepBeats; };
 
         if (!s.latch)
         {
@@ -89,13 +92,20 @@ public:
         }
         if (grid)
         {
-            // the first grid line at/after the block start not fired yet (a jump back re-arms)
-            if (h.ppq < prevPpq - 1.0e-6) lastGridIdx = std::numeric_limits<long long>::min();
-            long long k = (long long) std::floor(h.ppq / stepBeats) - 1;
-            while (stepBeat(k) < h.ppq - 1.0e-9 || k <= lastGridIdx) ++k;
+            // transport start, or a loop / seek jump: the pattern restarts here
+            if (std::abs(h.ppq - prevPpq) > 1.0e-3)
+            {
+                anchor = h.ppq;
+                lastFiredBeat = -std::numeric_limits<double>::infinity();
+                step = 0;
+            }
+            // the first step at/after the block start not fired yet (by beat, so a
+            // rate change can't strand the arp behind a stale step number)
+            long long k = (long long) std::floor((h.ppq - anchor) / stepBeats) - 1;
+            while (stepBeat(k) < h.ppq - 1.0e-9 || stepBeat(k) <= lastFiredBeat + 1.0e-9) ++k;
             gridIdx = k;
             untilNext = (stepBeat(k) - h.ppq) * spb;
-            prevPpq = h.ppq;
+            prevPpq = h.ppq + numSamples / spb; // where the next block starts if the transport runs on
         }
         else prevPpq = -1.0e9;
 
@@ -117,6 +127,12 @@ public:
                 offs[i] = offs[--offCount];
             }
             if (heldCount == 0) step = 0;
+            if (phraseStart)
+            {
+                // first key of a phrase: step 0 sounds on it, the rest count from here
+                phraseStart = false;
+                if (grid) { anchor = h.ppq + pos / spb; gridIdx = 0; untilNext = 0.0; }
+            }
             while (untilNext <= 0.0)
             {
                 if (heldCount == 0 && !grid) { untilNext = 0.0; gridIdx = 0; break; }
@@ -133,7 +149,7 @@ public:
                     if (offCount < kMaxOffs) offs[offCount++] = { n, juce::jmax(1, (int) (len * s.gate * 0.98)) };
                     ++step;
                 }
-                if (grid) lastGridIdx = gridIdx;
+                if (grid) lastFiredBeat = stepBeat(gridIdx);
                 untilNext += (stepBeat(gridIdx + 1) - stepBeat(gridIdx)) * spb;
                 ++gridIdx;
             }
@@ -171,6 +187,7 @@ private:
             bool anyDown = false;
             for (bool d : keyDown) anyDown = anyDown || d;
             if (s.latch && !anyDown) heldCount = 0; // latched: a fresh press starts a new chord
+            if (heldCount == 0) phraseStart = true;
             keyDown[note] = true;
             for (int i = 0; i < heldCount; ++i)
                 if (held[i] == note) { heldVel[i] = m.getFloatVelocity(); return; }
@@ -237,7 +254,9 @@ private:
     Off offs[kMaxOffs] = {};
     int offCount = 0;
     double untilNext = 0.0, prevPpq = -1.0e9;
-    long long gridIdx = 0, lastGridIdx = 0;
+    long long gridIdx = 0;
+    double lastFiredBeat = 0.0, anchor = 0.0; // anchor: host beat of the phrase's step 0
+    bool phraseStart = false;
     int step = 0, lastNote = -1;
     bool wasOn = false;
     juce::Random rng;

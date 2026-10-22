@@ -1131,6 +1131,28 @@ int main()
         CHECK(std::abs(straight - step) <= 33 && std::abs(swung - 1.5 * step) <= 33,
               "arp step 2 on the host grid (" << straight << "), swung half a step late (" << swung << ")");
         setParam(ap, PP::ARP_SWING, 0.0f);
+        // dotted from bar 2: steps count from the key in host beats (a song-start
+        // lattice put 1/8D between beats: first step on 4.5, not on the bar)
+        {
+            ap.panic(); renderFor(ap, sr, 0.05);
+            setParam(ap, PP::ARP_DIV, 5); // 1/8D = 0.75 beats
+            int first57 = -1, first60 = -1;
+            for (int pos = 0; pos < (int) sr && first60 < 0; pos += 32)
+            {
+                head.ppq = 4.0 + pos / beat;
+                juce::AudioBuffer<float> b(2, 32); b.clear();
+                juce::MidiBuffer m = pos == 0 ? chord : juce::MidiBuffer();
+                ap.renderOffline(b, m);
+                for (int n : ap.getActiveNotes())
+                {
+                    if (n == 57 && first57 < 0) first57 = pos;
+                    if (n == 60 && first60 < 0) first60 = pos;
+                }
+            }
+            CHECK(first57 >= 0 && first57 <= 33 && std::abs(first60 - 0.75 * beat) <= 33,
+                  "1/8D from bar 2: step 0 on the key (" << first57 << "), step 1 a dotted 8th later (" << first60 << ")");
+            setParam(ap, PP::ARP_DIV, 6);
+        }
         // latch: release the keys, the pattern keeps running
         setParam(ap, PP::ARP_LATCH, 1);
         juce::MidiBuffer up;
