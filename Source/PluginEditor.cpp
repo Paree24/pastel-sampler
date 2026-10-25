@@ -188,6 +188,8 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     presetBrowser.onClose = [this] { presetBrowser.setVisible(false); refreshPresetBox(); };
     presetBrowser.onLoaded = [this] { afterStateJump(); refreshPresetBox(); };
     refreshPresetBox();
+    button(midiBtn, { 1164, 22, 60, 30 }, {}); // tooltip comes from the button itself
+    midiBtn.setColour(juce::TextButton::buttonOnColourId, PC::accent);
 
     // ---------------- browser ----------------
     card("Browser", { 10, 76, 250, 512 });
@@ -1108,5 +1110,7 @@ void PastelEditor::timerCallback()
     if (currentPage == 2) for (auto& m : lfoMeters) m.repaint();
     preview.repaint();
     syncUi();
-
+    // the preset knob loads presets behind the UI's back
+    if (presetBtn.getButtonText() != proc.getPresetName())
+        afterStateJump();
 }

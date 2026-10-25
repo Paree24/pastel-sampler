@@ -43,6 +43,7 @@ set(PASTEL_SOURCES
   Source/Widgets.cpp
   Source/PresetBrowser.cpp
   Source/PianoStrip.cpp
+  Source/MidiLearn.cpp
 )
 
 set(PASTEL_DEFS

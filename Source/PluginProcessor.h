@@ -9,6 +9,7 @@
 #include "FileLibrary.h"
 #include "Params.h"
 #include "MidiArp.h"
+#include "MidiLearn.h"
 
 class PastelProcessor : public juce::AudioProcessor,
                         public juce::ChangeBroadcaster,
@@ -83,6 +84,8 @@ public:
     void resetToInit();
     // factory recipes (FactoryPresets.h): played on the loaded sample, root kept; one undo step
     void applyFactoryPreset(int index);
+    // preset knob: next / previous factory recipe from the current one (wraps)
+    void stepFactoryPreset(int delta);
     juce::String getPresetName() const { return apvts.state.getProperty("presetName", "Init").toString(); }
     void setPresetName(const juce::String& n) { apvts.state.setProperty("presetName", n, nullptr); }
 
@@ -121,6 +124,7 @@ public:
     int loopMode() const; // 0 off, 1 forward, 2 ping-pong, 3 sustain (LOOP toggle + loop type)
 
     juce::AudioProcessorValueTreeState apvts;
+    pastel::MidiLearn midiLearn { *this, "Pastel Sampler" }; // global CC map + preset knob
     FileLibrary library;
     RootScanner rootScanner;
     juce::MidiKeyboardState keyboardState;

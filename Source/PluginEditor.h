@@ -7,6 +7,7 @@
 #include "Widgets.h"
 #include "PresetBrowser.h"
 #include "PastelViews.h"
+#include "MidiLearn.h"
 
 // Browser list: folders first, then audio files with a format tag and detected root.
 class FileListModel : public juce::ListBoxModel
@@ -113,6 +114,7 @@ private:
     void afterStateJump(); // after undo / redo / preset / randomize: refresh custom views
     juce::TextButton presetBtn; // shows the current preset name, opens the browser
     PresetBrowser presetBrowser;
+    pastel::MidiLearnButton midiBtn { proc.midiLearn };
 
     // browser
     juce::TextEditor searchBox;

@@ -25,6 +25,7 @@ PastelProcessor::PastelProcessor()
     startTimerHz(15);
     // dev hook: preload a sample (used for screenshots / smoke tests)
     if (auto* f = std::getenv("PASTEL_AUTOLOAD"); f != nullptr && *f != 0) loadSample(f);
+    midiLearn.onPresetStep = [this](int delta) { stepFactoryPreset(delta); };
 }
 
 PastelProcessor::~PastelProcessor()
@@ -656,6 +657,7 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     juce::ScopedNoDenormals noDenormals;
     const int num = buffer.getNumSamples();
     buffer.clear();
+    midiLearn.process(midi); // learned CCs land before this block renders
     keyboardState.processNextMidiBuffer(midi, 0, num, true);
 
     // host tempo / position: LFO sync + the arp grid
@@ -999,6 +1001,19 @@ void PastelProcessor::applyFactoryPreset(int index)
             r->setValueNotifyingHost(r->convertTo0to1(value));
     resetPartialGains();
     setPresetName(all[(size_t) index].name);
+}
+
+void PastelProcessor::stepFactoryPreset(int delta)
+{
+    const auto& all = FactoryPresets::all();
+    const int n = (int) all.size();
+    if (n == 0 || delta == 0) return;
+    int cur = -1;
+    for (int i = 0; i < n; ++i)
+        if (all[(size_t) i].name == getPresetName()) { cur = i; break; }
+    // from a user preset / Init: forward starts at the first recipe, back at the last
+    const int next = cur < 0 ? (delta > 0 ? 0 : n - 1) : ((cur + delta) % n + n) % n;
+    applyFactoryPreset(next);
 }
 
 // which randomize group a parameter belongs to (-1: never randomized)
