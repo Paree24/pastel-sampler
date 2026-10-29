@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <mutex>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "Analysis.h"
@@ -197,7 +198,13 @@ private:
     std::array<std::shared_ptr<const void>, 64> retireSlots;
     juce::AbstractFifo retireFifo { 64 };
 
-    juce::ThreadPool pool { 1 };
+    // Worker threads start on first use, not in the constructor: hosts and the
+    // VST3 build's module-info step create and destroy instances that never
+    // load anything, and on Windows threads ending right as such a process
+    // exits can deadlock with the loader.
+    std::unique_ptr<juce::ThreadPool> pool;
+    std::once_flag poolOnce;
+    juce::ThreadPool& jobPool();
     std::atomic<int> generation { 0 }, loadingCount { 0 };
     std::atomic<float> loadProgress { 1.0f };
     juce::String status { juce::String(juce::CharPointer_UTF8("No sample loaded — browse on the left, double-click to load")) };
@@ -222,7 +229,9 @@ private:
     juce::String samplePath;
     std::vector<float> previewPeaks;
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
-    juce::ThreadPool previewPool { 1 };
+    std::unique_ptr<juce::ThreadPool> previewPool;
+    std::once_flag previewPoolOnce;
+    juce::ThreadPool& previewJobPool();
     bool asyncLoads = true;
     void loadInternal(const juce::String& path, const SampleEdits* restore, bool sync);
     void applyStateTree(const juce::ValueTree& tree);

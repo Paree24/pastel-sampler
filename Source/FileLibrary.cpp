@@ -151,8 +151,7 @@ void FileLibrary::setUiScale(double s)
 // ---------------------------------------------------------------------------
 RootScanner::RootScanner() : juce::Thread("PastelRootScanner")
 {
-    formats.registerBasicFormats();
-    startThread(juce::Thread::Priority::low);
+    formats.registerBasicFormats();   // the thread starts with the first request (see PastelProcessor)
 }
 
 RootScanner::~RootScanner()
@@ -168,6 +167,7 @@ void RootScanner::request(const juce::StringArray& paths)
         for (auto& p : paths)
             if (results.find(p) == results.end()) queue.add(p);
     }
+    if (! isThreadRunning()) startThread(juce::Thread::Priority::low);
     notify();
 }
 

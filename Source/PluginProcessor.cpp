@@ -32,8 +32,8 @@ PastelProcessor::~PastelProcessor()
 {
     *alive = false;
     stopTimer();
-    pool.removeAllJobs(true, 10000);
-    previewPool.removeAllJobs(true, 10000);
+    if (pool != nullptr) pool->removeAllJobs(true, 10000);
+    if (previewPool != nullptr) previewPool->removeAllJobs(true, 10000);
     for (auto* id : { &PP::LOOP_ON, &PP::LOOP_TYPE, &PP::S_XFADE, &PP::QUALITY, &PP::ALGO })
         apvts.removeParameterListener(*id, this);
     for (auto* prm : getParameters()) prm->removeListener(this);
@@ -387,10 +387,22 @@ void PastelProcessor::install(BuildOutput out)
     sendChangeMessage();
 }
 
+juce::ThreadPool& PastelProcessor::jobPool()
+{
+    std::call_once(poolOnce, [this] { pool = std::make_unique<juce::ThreadPool>(1); });
+    return *pool;
+}
+
+juce::ThreadPool& PastelProcessor::previewJobPool()
+{
+    std::call_once(previewPoolOnce, [this] { previewPool = std::make_unique<juce::ThreadPool>(1); });
+    return *previewPool;
+}
+
 void PastelProcessor::startJob(std::function<void()> job)
 {
     ++loadingCount;
-    pool.addJob([this, job]
+    jobPool().addJob([this, job]
     {
         job();
         --loadingCount;
@@ -587,7 +599,7 @@ void PastelProcessor::previewFile(const juce::String& path)
 {
     const int gen = ++previewGen;
     std::weak_ptr<bool> token = alive;
-    previewPool.addJob([this, path, gen, token]
+    previewJobPool().addJob([this, path, gen, token]
     {
         juce::AudioFormatManager fm;
         fm.registerBasicFormats();
